@@ -1,0 +1,22 @@
+services:
+  servidor:
+    build: ./Server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./Server:/app
+    networks:
+      - minha_rede
+
+  cliente:
+    build: ./Client
+    volumes:
+      - ./Client:/app
+    depends_on:
+      - servidor
+    networks:
+      - minha_rede
+
+networks: 
+  minha_rede:
+    driver: bridge

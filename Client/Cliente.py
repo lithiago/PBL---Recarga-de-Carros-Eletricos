@@ -1,6 +1,6 @@
 import socket
 from threading import Thread
-import requests
+# import requests
 import math
 import time
 import random
@@ -15,8 +15,22 @@ class Client:
         self.bateria = 100
         self.longitude = 0
         self.latitude = 0
-        self.consumo_kw = random.randrange(0,1, 0.1)
+        # Para todo objeto de cliente é chamado os próximos dois métodos
+        self.talk_to_server()
+       # self.localizacao()
         
+        """ self.chaves{
+            "Bateria": self.atualiza_bateria,
+            "Rota": self.define_rota
+        } """
+    
+    def talk_to_server(self):
+        Thread(target= self.receive_data).start()
+        self.send_data()
+    
+    # Uma thread para atualizar a localização do carro. Assim conseguindo simular perfeitamente as mudanças de direções do veículo.    
+    def localizacao(self):
+        Thread(target=self.atualiza_localizacao).start()
 
     def get_local_ip():
         local_hostname = socket.gethostname()
@@ -27,7 +41,20 @@ class Client:
     def send_data(self):
         data = json.dumps({"latitude": self.latitude, "longitude": self.longitude, "bateria": self.bateria})  # Converte para JSON
         self.socket_client.sendall(data.encode())  # Converte para bytes e envia
-        
+    # Eu sei que sempre vou receber um dado JSON. Porém como vou determinar qual o conteúdo chegou? Vários if's não parece a melhor solução, talvez um método para cada dado que vou receber?
+    def receive_data(self):
+        while True:
+            server_data = self.socket_client.recv(1024).decode()
+            try:
+                data = json.loads(server_data)
+                if "tipo" in data:
+                    handler = self.handlers.get(data["tipo"])
+                    if handler:
+                        handler(data)
+                    else:
+                        print(f"Tipo de mensagem desconhecido: {data['tipo']}")
+            except json.JSONDecodeError:
+                print("Erro ao decodificar JSON recebido:", server_data)
     def atualiza_localizacao(self):
         client_ip = self.get_local_ip()
         if self.latitude == 0 and self.longitude == 0:
@@ -56,7 +83,9 @@ class Client:
             self.latitude += deslocamento_graus * math.cos(math.radians(direcao))
             self.longitude += deslocamento_graus * math.sin(math.radians(direcao))
             time.sleep(intervalo_segundos)
-            self.bateria -= deslocamento_metros / 1000 * self.consumo_kwh   
+            self.bateria -= deslocamento_metros / 1000 * self.consumo_kwh    
+    def solicita_recarga(self):
+        self.send_data()
 
             
-            
+Client("servidor", 8080)
