@@ -2,7 +2,7 @@
 FROM python:3.9
 
 # Definir o diretório de trabalho dentro do container
-WORKDIR /Server
+WORKDIR /app
 
 # Copiar os arquivos do servidor para dentro do container
 

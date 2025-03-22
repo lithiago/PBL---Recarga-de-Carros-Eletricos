@@ -1,6 +1,6 @@
 services:
   servidor:
-    build: ./Server
+    build: Server/
     ports:
       - "8080:8080"
     volumes:
@@ -9,7 +9,7 @@ services:
       - minha_rede
 
   cliente:
-    build: ./Client
+    build: Client/
     volumes:
       - ./Client:/app
     depends_on:

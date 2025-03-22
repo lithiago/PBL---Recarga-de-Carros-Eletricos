@@ -1,7 +1,7 @@
 FROM python:3.9
 
-WORKDIR /Client
+WORKDIR /app
 
-COPY . /Client
+COPY . /app
 
-CMD ["python", "Cliente.py"]
+CMD ["python", "cliente2.py"]
