@@ -4,32 +4,53 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"time"
 )
+
+
+type Client struct{
+	conn net.Conn // Conexão TCP
+	latitude float32
+	longitude float32
+	id string
+	bateria int
+}
+
+
+func NewClient(host string, port string) (*Client, error){
+	address := net.JoinHostPort(host, port)
+	conn, err := net.Dial("tcp", address)
+	if err != nil{
+		return nil, err
+	}
+	return &Client{conn: conn}, nil
+}
+
+func (c *Client) Send(message string) error {
+	_, err := c.conn.Write([]byte(message))
+	return err
+}
+
+
+
 
 func main() {
 	// Definindo o endereço do servidor
-	serverAddress := "server:3000"
-	
-	// Estabelecendo a conexão TCP com o servidor
-	conn, err := net.Dial("tcp", serverAddress)
+	client, err := NewClient("server", "3000")
 	if err != nil {
 		fmt.Println("Erro ao conectar ao servidor:", err)
 		os.Exit(1)
 	}
 
 	// Mensagem a ser enviada
-	message := "Olá, servidor!"
+	
+	err = client.Send("Olá, servidor!")
 
-	// Enviando a mensagem para o servidor
-	_, err = conn.Write([]byte(message))
+
 	if err != nil {
 		fmt.Println("Erro ao enviar dados:", err)
 		os.Exit(1)
 	}
 
-	// Espera para garantir que a mensagem seja recebida pelo servidor
-	time.Sleep(1 * time.Second)
 
-	fmt.Println("Mensagem enviada para o servidor:", message)
+	fmt.Println("Mensagem enviada para o servidor!")
 }

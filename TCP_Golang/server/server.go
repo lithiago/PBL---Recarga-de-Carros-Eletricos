@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"encoding/json"
+	"io"
+	"math"
 )
 
 type Server struct {
@@ -14,6 +18,25 @@ type Server struct {
 	msgch      chan []byte   // Canal para comunicação de mensagens
 }
 
+
+type Ponto struct {
+	latitude float64
+	longitude float64
+	fila []string
+	disponibilidade bool
+}
+
+type Coodernadas struct{
+	latitude float64
+	longitude float64
+}
+
+// Eu vou precisar ficar montirando a bateria do carro? Se sim atribuir a bateria a struct.
+type Cliente struct{
+	// Endereco net.Addr
+	SaldoDevedor map[string]float64 // Key - Data || Value - Preço da Recarga
+	ExtratoDePagamento map[string]float64 // Key - Data || Value - Preço da Recargat64 // Aqui 
+}
 func NewServer(listenAddr string) *Server {
 	return &Server{
 		listenAddr: listenAddr,
@@ -48,10 +71,44 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 
-		fmt.Println("Novo cliente conectado:", conn.RemoteAddr())
-		go s.readLoop(conn) // Cada conexão é processada em uma goroutine para permitir múltiplos clientes simultâneos.
+		// Converter o endereço remoto para string
+		endereco := conn.RemoteAddr().String()
+
+		// Carregar clientes já armazenados no JSON
+		clientes := make(map[string]Cliente)
+		data, err := os.ReadFile("Clients/ClientesConectados.json")
+		if err == nil {
+			_ = json.Unmarshal(data, &clientes) // Ignorar erro se o arquivo estiver vazio
+		}
+
+		// Adicionar o novo cliente sem perder os anteriores
+		clientes[endereco] = Cliente{
+			SaldoDevedor:        make(map[string]float64),
+			ExtratoDePagamento:  make(map[string]float64),
+		}
+
+		// Converter o mapa atualizado para JSON
+		clientesJSON, err := json.MarshalIndent(clientes, "", "  ")
+		if err != nil {
+			fmt.Println("Erro ao serializar clientes:", err)
+			continue
+		}
+
+		// Gravar no arquivo JSON
+		err = os.WriteFile("Clients/ClientesConectados.json", clientesJSON, 0644)
+		if err != nil {
+			fmt.Println("Erro ao escrever arquivo JSON:", err)
+			continue
+		}
+
+		fmt.Println("Novo cliente conectado:", endereco)
+
+		// Cada conexão é processada em uma goroutine para permitir múltiplos clientes simultâneos.
+		go s.readLoop(conn)
 	}
 }
+
+
 
 func (s *Server) readLoop(conn net.Conn) {
 	defer func() {
@@ -76,6 +133,65 @@ func (s *Server) readLoop(conn net.Conn) {
 	if err := scanner.Err(); err != nil {
 		fmt.Println("Erro de leitura do cliente:", err)
 	}
+}
+// Só precisa ser executado uma vez para obter a localização dos pontos. Essa é a função que retorna a requisição do cliente. Ordem buscaPontosDeRecarga -> distanciaEntrePontos -> enviaMelhoresOpcoesDePontos
+func (s *Server) buscaPontosDeRecarga() (map[string]Ponto, error) {
+    // 1. Abre o arquivo (corrigido para usar 'defer' corretamente)
+    jsonPontos, err := os.Open("../Pontos/Pontos.json")
+    if err != nil {
+        return map[string]Ponto{}, fmt.Errorf("falha ao abrir arquivo JSON: %w", err)
+    }
+    defer jsonPontos.Close() // Garante que o arquivo será fechado
+
+    // 2. Lê o conteúdo (usando io.ReadAll em vez do depreciado ioutil.ReadAll)
+    byteValueJson, err := io.ReadAll(jsonPontos)
+    if err != nil {
+        return map[string]Ponto{}, fmt.Errorf("falha ao ler arquivo JSON: %w", err)
+    }
+
+    // 3. Decodifica o JSON
+    var pontoMap map[string]Ponto
+    if err := json.Unmarshal(byteValueJson, &pontoMap); err != nil {
+        return map[string]Ponto{}, fmt.Errorf("falha ao decodificar JSON: %w", err)
+    }
+
+    return pontoMap, nil
+}
+
+
+func distanciaEntrePontos(posicaoVeiculo *Coodernadas, posicaoPosto *Coodernadas) float64{
+	var earthRadius float64 = 6371000 
+	// Converter graus para radianos
+    latVeiculo := posicaoVeiculo.latitude * math.Pi / 180
+    lonVeiculo := posicaoVeiculo.longitude * math.Pi / 180
+    latPosto := posicaoPosto.latitude * math.Pi / 180
+    lonPosto := posicaoPosto.longitude * math.Pi / 180
+
+    // Diferenças
+    dLat := latPosto - latPosto
+    dLon := lonPosto - lonVeiculo
+
+    // Fórmula de Haversine
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+	math.Cos(latVeiculo)*math.Cos(latPosto)*
+	math.Sin(dLon/2)*math.Sin(dLon/2)
+   c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+    // Distância em metros
+    distancia := earthRadius * c
+
+	return distancia
+}
+
+// Ordenar e assim definir as melhores opções. No momento só considero as melhores opções a partir da distância, não levando em consideração o tempo de espera.
+func (s *Server) enviaMelhoresOpcoesDePontos(latitudeVeiculo float64, longitudeVeiculo float64, mapPonto map[string]Ponto) map[string]float64{
+	posicaoVeiculo := Coodernadas{latitude: latitudeVeiculo, longitude: longitudeVeiculo}
+	var opcoesPontos map[string]float64
+	for id, p :=  range mapPonto{
+		posicaoPosto := Coodernadas{latitude: p.latitude, longitude: p.longitude}
+		opcoesPontos[id] = distanciaEntrePontos(&posicaoVeiculo, &posicaoPosto)	
+	}
+	return opcoesPontos
 }
 
 func (s *Server) handleMessages() {
