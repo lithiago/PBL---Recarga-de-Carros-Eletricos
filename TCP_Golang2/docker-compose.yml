@@ -1,0 +1,27 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: server
+    ports:
+      - "3000:3000"
+    networks:
+      - go-network
+    restart: on-failure
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: client
+    networks:
+      - go-network
+    depends_on:
+      - server
+    restart: on-failure
+    entrypoint: ["sh", "-c", "sleep 5 && ./client"] # Atrasar a execução do cliente para garantir que o servidor esteja em funcionamento
+
+networks:
+  go-network:
+    driver: bridge
