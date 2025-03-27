@@ -4,7 +4,7 @@ FROM golang:1.19-alpine AS builder
 # Definir o diretório de trabalho dentro do container
 WORKDIR /app
 
-# Copiar o código do cliente para o container
+# Copiar o código do servidor para o container
 COPY client/client.go .
 
 # Compilar o código Go
@@ -16,8 +16,9 @@ FROM alpine:latest
 # Definir o diretório de trabalho
 WORKDIR /app
 
-# Copiar o binário compilado do cliente
+# Copiar o binário compilado do servidor
 COPY --from=builder /app/client .
 
-# Comando para rodar o cliente
+
+# Comando para rodar o servidor
 CMD ["./client"]

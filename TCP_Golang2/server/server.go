@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Server struct {
@@ -18,6 +19,8 @@ type Server struct {
 	ln         net.Listener  // Listener do Socket TCP
 	quitch     chan struct{} // Canal de sinalização para encerrar o servidor
 	msgch      chan []byte   // Canal para comunicação de mensagens
+	clients map[net.Addr]net.Conn // Armazena conexões ativas
+	mu sync.Mutex
 }
 
 
@@ -66,6 +69,18 @@ func (s *Server) Start() error {
 	return nil
 }
 
+
+func (s *Server) receber_mensagem(cliente net.Conn) (string, error) {
+	reader := bufio.NewReader(cliente)
+	mensagem, err := reader.ReadString('\n')
+
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(mensagem), nil
+}
+
 func (s *Server) acceptLoop() {
 	for {
 		conn, err := s.ln.Accept() // Bloqueia até que um cliente se conecte
@@ -74,11 +89,17 @@ func (s *Server) acceptLoop() {
 			continue
 		}
 
+		
 		// Converter o endereço remoto para string
-		endereco := conn.RemoteAddr().String()
+		endereco := conn.RemoteAddr()
+		
+		/* // Salvar conexão
+		s.mu.Lock()
+		s.clients[endereco] = conn
+		s.mu.Unlock() */
 
 		// Carregar clientes já armazenados no JSON
-		clientes := make(map[string]Cliente)
+		clientes := make(map[net.Addr]Cliente)
 		data, err := os.ReadFile("Clients/ClientesConectados.json")
 		if err == nil {
 			_ = json.Unmarshal(data, &clientes) // Ignorar erro se o arquivo estiver vazio
@@ -90,23 +111,7 @@ func (s *Server) acceptLoop() {
 			ExtratoDePagamento:  make(map[string]float64),
 		}
 
-		// Converter o mapa atualizado para JSON
-		clientesJSON, err := json.MarshalIndent(clientes, "", "  ")
-		if err != nil {
-			fmt.Println("Erro ao serializar clientes:", err)
-			continue
-		}
-
-		err1 := os.MkdirAll("Clients", 0755)
-		if err1 != nil{
-			fmt.Println("Errp ao criar arquivo JSON")
-		}
-		// Gravar no arquivo JSON
-		err = os.WriteFile("ClientesConectados.json", clientesJSON, 0644)
-		if err != nil {
-			fmt.Println("Erro ao escrever arquivo JSON:", err)
-			continue
-		}
+		s.registrarCliente(conn)
 
 		fmt.Println("Novo cliente conectado:", endereco)
 
@@ -115,109 +120,130 @@ func (s *Server) acceptLoop() {
 	}
 }
 
+func (s *Server) registrarCliente(conn net.Conn) {
+	endereco := conn.RemoteAddr().String()
+	clientes := make(map[string]Cliente)
+
+	data, err := os.ReadFile("Clients/ClientesConectados.json")
+	if err == nil {
+		_ = json.Unmarshal(data, &clientes)
+	}
+
+	clientes[endereco] = Cliente{
+		SaldoDevedor:       make(map[string]float64),
+		ExtratoDePagamento: make(map[string]float64),
+	}
+
+	clientesJSON, err := json.MarshalIndent(clientes, "", "  ")
+	if err != nil {
+		fmt.Println("Erro ao serializar clientes:", err)
+		return
+	}
+
+	_ = os.MkdirAll("Clients", 0755)
+	err = os.WriteFile("Clients/ClientesConectados.json", clientesJSON, 0644)
+	if err != nil {
+		fmt.Println("Erro ao escrever arquivo JSON:", err)
+	}
+}
 
 func (s *Server) readLoop(conn net.Conn) {
-    defer func() {
-        fmt.Println("Cliente desconectado:", conn.RemoteAddr())
-        conn.Close()
-    }()
+	defer func() {
+		// s.mu.Lock()
+		// delete(s.clients, conn.RemoteAddr())
+		// s.mu.Unlock()
+		fmt.Println("Cliente desconectado:", conn.RemoteAddr())
+		conn.Close()
+	}()
 
-    scanner := bufio.NewScanner(conn)
-    for scanner.Scan() {
-        msg := strings.TrimSpace(scanner.Text())
-        if msg == "" {
-            continue
-        }
+	for {	
+		mens_receb, err := s.receber_mensagem(conn)
+		if err != nil {
+			fmt.Println("Erro ao receber mensagem:", err)
+			return
+		}
 
-        
-        // Separar os dados recebidos
-        partes := strings.Fields(msg)
-        fmt.Println("Mensagem recebida do cliente:", partes)
+		partes := strings.Fields(mens_receb)
 
-        // Verifica se é uma requisição de pontos
-        if len(partes) > 0 && partes[0] == "Pontos" {
-            if len(partes) != 3 {
-                conn.Write([]byte("ERRO: Formato deve ser 'Pontos latitude longitude'\n"))
-                continue
-            }
+		if len(partes) == 0 {
+			conn.Write([]byte("Comando inválido\n"))
+			continue
+		}
 
-            mapPontos, err := s.buscaPontosDeRecarga()
-			fmt.Println(mapPontos)
-            if err != nil {
-                conn.Write([]byte("ERRO: Não foi possível obter pontos de recarga\n"))
-                continue
-            }
-            
-            s.processaSolicitacaoPontos(conn, partes, mapPontos)
-            continue
-        }
+		switch partes[0] {
+		case "Pontos":
+			if len(partes) != 3 {
+				conn.Write([]byte("ERRO: Formato deve ser 'Pontos latitude longitude'\n"))
+				continue
+			}
 
-        // Resposta padrão para outras mensagens
-        _, err := fmt.Fprintf(conn, "Mensagem recebida: %s\n", msg)
-        if err != nil {
-            fmt.Println("Erro ao enviar resposta ao cliente:", err)
-            break
-        }
-    }
+			mapPontos, err := s.buscaPontosDeRecarga()
+			if err != nil {
+				conn.Write([]byte("ERRO: Não foi possível obter pontos de recarga\n"))
+				continue
+			}
 
-    if err := scanner.Err(); err != nil {
-        fmt.Println("Erro de leitura do cliente:", err)
-    }
+			s.processaSolicitacaoPontos(conn, partes, mapPontos)
+		case "Sair":
+			fmt.Println("Cliente solicitou desconexão:", conn.RemoteAddr())
+			return
+		default:
+			conn.Write([]byte("Comando não reconhecido\n"))
+		}
+	}
 }
 // Só precisa ser executado uma vez para obter a localização dos pontos. Essa é a função que retorna a requisição do cliente. Ordem buscaPontosDeRecarga -> distanciaEntrePontos -> enviaMelhoresOpcoesDePontos
 func (s *Server) buscaPontosDeRecarga() (map[string]Ponto, error) {
-    // 1. Abre o arquivo (corrigido para usar 'defer' corretamente)
-    jsonPontos, err := os.Open("Pontos.json")
-    if err != nil {
-        return map[string]Ponto{}, fmt.Errorf("falha ao abrir arquivo JSON: %w", err)
-    }
-    defer jsonPontos.Close() // Garante que o arquivo será fechado
+	jsonPontos, err := os.Open("Pontos.json")
+	if err != nil {
+		return nil, fmt.Errorf("falha ao abrir arquivo JSON: %w", err)
+	}
+	defer jsonPontos.Close()
 
-    // 2. Lê o conteúdo (usando io.ReadAll em vez do depreciado ioutil.ReadAll)
-    byteValueJson, err := io.ReadAll(jsonPontos)
-    if err != nil {
-        return map[string]Ponto{}, fmt.Errorf("falha ao ler arquivo JSON: %w", err)
-    }
+	byteValueJson, err := io.ReadAll(jsonPontos)
+	if err != nil {
+		return nil, fmt.Errorf("falha ao ler arquivo JSON: %w", err)
+	}
 
-    // 3. Decodifica o JSON
-    var pontoMap map[string]Ponto
-    if err := json.Unmarshal(byteValueJson, &pontoMap); err != nil {
-        return map[string]Ponto{}, fmt.Errorf("falha ao decodificar JSON: %w", err)
-    }
+	pontoMap := make(map[string]Ponto)
+	if err := json.Unmarshal(byteValueJson, &pontoMap); err != nil {
+		return nil, fmt.Errorf("falha ao decodificar JSON: %w", err)
+	}
 
-    return pontoMap, nil
+	return pontoMap, nil
 }
 
 
 func distanciaEntrePontos(posicaoVeiculo *Coodernadas, posicaoPosto *Coodernadas) float64 {
-    var earthRadius float64 = 6371000 
-    latVeiculo := posicaoVeiculo.latitude * math.Pi / 180
-    lonVeiculo := posicaoVeiculo.longitude * math.Pi / 180
-    latPosto := posicaoPosto.latitude * math.Pi / 180
-    lonPosto := posicaoPosto.longitude * math.Pi / 180
+	const earthRadius = 6371000
 
-    // Correção: usar latVeiculo em vez de latPosto
-    dLat := latPosto - latVeiculo
-    dLon := lonPosto - lonVeiculo
+	latVeiculo := posicaoVeiculo.latitude * math.Pi / 180
+	lonVeiculo := posicaoVeiculo.longitude * math.Pi / 180
+	latPosto := posicaoPosto.latitude * math.Pi / 180
+	lonPosto := posicaoPosto.longitude * math.Pi / 180
 
-    a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-        math.Cos(latVeiculo)*math.Cos(latPosto)*
-            math.Sin(dLon/2)*math.Sin(dLon/2)
-    c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	dLat := latPosto - latVeiculo
+	dLon := lonPosto - lonVeiculo
 
-    return earthRadius * c
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(latVeiculo)*math.Cos(latPosto)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+
+	return earthRadius * c
 }
 
 // Ordenar e assim definir as melhores opções. No momento só considero as melhores opções a partir da distância, não levando em consideração o tempo de espera.
+
 func (s *Server) enviaMelhoresOpcoesDePontos(latitudeVeiculo float64, longitudeVeiculo float64, mapPonto map[string]Ponto) map[string]float64 {
-    posicaoVeiculo := Coodernadas{latitude: latitudeVeiculo, longitude: longitudeVeiculo}
-    opcoesPontos := make(map[string]float64) // Inicialização do mapa
-    
-    for id, p := range mapPonto {
-        posicaoPosto := Coodernadas{latitude: p.latitude, longitude: p.longitude}
-        opcoesPontos[id] = distanciaEntrePontos(&posicaoVeiculo, &posicaoPosto)    
-    }
-    return opcoesPontos
+	posicaoVeiculo := Coodernadas{latitude: latitudeVeiculo, longitude: longitudeVeiculo}
+	opcoesPontos := make(map[string]float64)
+
+	for id, p := range mapPonto {
+		posicaoPosto := Coodernadas{latitude: p.latitude, longitude: p.longitude}
+		opcoesPontos[id] = distanciaEntrePontos(&posicaoVeiculo, &posicaoPosto)
+	}
+	return opcoesPontos
 }
 
 func (s *Server) handleMessages() {
@@ -231,40 +257,33 @@ func (s *Server) handleMessages() {
 	}
 }
 
-func (s *Server) processaSolicitacaoPontos(conn net.Conn, partes []string, mapPonto map[string]Ponto) {
-	fmt.Println("Pontos recebidos:", mapPonto) // Verifique se os pontos estão sendo carregados
-	// Verifica se os parâmetros necessários foram enviados
+func (s *Server) processaSolicitacaoPontos(cliente net.Conn, partes []string, mapPonto map[string]Ponto) {
 	if len(partes) != 3 {
-		conn.Write([]byte("Erro: Formato inválido\n"))
+		cliente.Write([]byte("Erro: Formato inválido\n"))
 		return
 	}
 
-	// Converte latitude e longitude para float64
-
 	latitude, err := strconv.ParseFloat(partes[1], 64)
 	if err != nil {
-		conn.Write([]byte("Erro: Latitude inválida\n"))
+		cliente.Write([]byte("Erro: Latitude inválida\n"))
 		return
 	}
 
 	longitude, err := strconv.ParseFloat(partes[2], 64)
 	if err != nil {
-		conn.Write([]byte("Erro: Longitude inválida\n"))
+		cliente.Write([]byte("Erro: Longitude inválida\n"))
 		return
 	}
 
-	// Busca os melhores pontos de recarga
 	pontos := s.enviaMelhoresOpcoesDePontos(latitude, longitude, mapPonto)
-	fmt.Println("Pontos processados:", pontos) // Verifique o resultado do cálculo
-	// Converte para JSON
+
 	jsonPontos, err := json.Marshal(pontos)
 	if err != nil {
-		conn.Write([]byte("Erro ao processar resposta\n"))
+		cliente.Write([]byte("Erro ao processar resposta\n"))
 		return
 	}
 
-	// Envia resposta ao cliente
-	conn.Write(append(jsonPontos, '\n'))
+	cliente.Write(append(jsonPontos, '\n'))
 }
 
 
