@@ -21,6 +21,17 @@ services:
     stdin_open: true
     tty: true
 
+  ponto:
+    build:
+      context: .
+      dockerfile: Pontos/Dockerfile
+    networks:
+      - go-network
+    depends_on:
+      - server
+    stdin_open: true
+    tty:  true
+
 networks:
   go-network:
     driver: bridge
