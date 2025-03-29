@@ -4,54 +4,56 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
+	"sort"
 	"log"
 	"math"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 )
 
 type Server struct {
-	listenAddr string        // Endereço IP e porta onde o servidor escutará conexões
-	ln         net.Listener  // Listener do Socket TCP
-	quitch     chan struct{} // Canal de sinalização para encerrar o servidor
-	msgch      chan []byte   // Canal para comunicação de mensagens
-	clients map[net.Addr]net.Conn // Armazena conexões ativas
-	mu sync.Mutex
+	listenAddr string        
+	ln         net.Listener  
+	quitch     chan struct{} 
+	msgch      chan []byte   
+	clients    map[int]Cliente 
+	pontos     map[int]net.Conn
+	mu         sync.Mutex
 }
-
 
 type Ponto struct {
-	latitude float64
-	longitude float64
-	fila []string
-	disponibilidade bool
+	Conn          net.Conn   `json:"conn"`
+	Latitude      float64    `json:"latitude"`
+	Longitude     float64    `json:"longitude"`
+	Fila          []string   `json:"fila"`
+	TempoDeEspera int       `json:"tempoDeEspera"`
 }
 
-type Coodernadas struct{
-	latitude float64
-	longitude float64
+type Coordenadas struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
 }
 
-// Eu vou precisar ficar montirando a bateria do carro? Se sim atribuir a bateria a struct.
-type Cliente struct{
-	// Endereco net.Addr
-	SaldoDevedor map[string]float64 // Key - Data || Value - Preço da Recarga
-	ExtratoDePagamento map[string]float64 // Key - Data || Value - Preço da Recargat64 // Aqui 
+type Cliente struct {
+	Endereco           net.Conn             `json:"endereco"`
+	SaldoDevedor       map[string]float64   `json:"saldoDevedor"`
+	ExtratoDePagamento map[string]float64   `json:"extratoDePagamento"`
 }
+
 func NewServer(listenAddr string) *Server {
 	return &Server{
 		listenAddr: listenAddr,
 		quitch:     make(chan struct{}),
-		msgch:      make(chan []byte), // Inicializa o canal para mensagens
+		msgch:      make(chan []byte),
+		clients:    make(map[int]Cliente),
+		pontos:     make(map[int]net.Conn),
 	}
 }
 
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.listenAddr) // Cria um listener TCP na porta definida.
+	ln, err := net.Listen("tcp", s.listenAddr)
 	if err != nil {
 		return err
 	}
@@ -60,102 +62,72 @@ func (s *Server) Start() error {
 	s.ln = ln
 	fmt.Println("Servidor iniciado na porta", s.listenAddr)
 
-	go s.acceptLoop() // Agora o servidor aceita conexões
+	go s.acceptLoop()
+	go s.handleMessages()
 
-	go s.handleMessages() // Goroutine para processar as mensagens
-	
-
-	<-s.quitch // Bloqueia a execução até que o canal quitch receba um sinal (indicando o encerramento do servidor)
+	<-s.quitch
 	return nil
 }
-
 
 func (s *Server) receber_mensagem(conn net.Conn) (string, error) {
 	reader := bufio.NewReader(conn)
 	mensagem, err := reader.ReadString('\n')
-
 	if err != nil {
 		return "", err
 	}
-
 	return strings.TrimSpace(mensagem), nil
 }
 
 func (s *Server) acceptLoop() {
 	for {
-		conn, err := s.ln.Accept() // Bloqueia até que um cliente se conecte
+		conn, err := s.ln.Accept()
 		if err != nil {
 			fmt.Println("Erro ao aceitar conexão:", err)
 			continue
 		}
-
-		
-		// Converter o endereço remoto para string
-		endereco := conn.RemoteAddr()
-		
-		/* // Salvar conexão
-		s.mu.Lock()
-		s.clients[endereco] = conn
-		s.mu.Unlock() */
-
-		// Carregar clientes já armazenados no JSON
-		clientes := make(map[net.Addr]Cliente)
-		data, err := os.ReadFile("Clients/ClientesConectados.json")
-		if err == nil {
-			_ = json.Unmarshal(data, &clientes) // Ignorar erro se o arquivo estiver vazio
+		msg, err := s.receber_mensagem(conn)
+		if err != nil {
+			fmt.Println("Erro ao receber mensagem:", err)
+			conn.Close()
+			continue
 		}
 
-		// Adicionar o novo cliente sem perder os anteriores
-		clientes[endereco] = Cliente{
-			SaldoDevedor:        make(map[string]float64),
-			ExtratoDePagamento:  make(map[string]float64),
+		if msg == "client" {
+			fmt.Println("Entrou!!!!")
+			s.mu.Lock()
+			id := len(s.clients)
+			cliente := Cliente{
+				Endereco:          conn,
+				SaldoDevedor:      make(map[string]float64),
+				ExtratoDePagamento: make(map[string]float64),
+			}
+			s.clients[id] = cliente
+			s.mu.Unlock()
+			fmt.Println("Novo cliente conectado:", conn.RemoteAddr().String())
+		} else if msg == "ponto" {
+			fmt.Println("Entrou:", msg)
+			s.mu.Lock()
+			id := len(s.pontos)
+			s.pontos[id] = conn
+			s.mu.Unlock()
+			fmt.Println("Novo ponto conectado:", conn.RemoteAddr().String())
 		}
 
-		s.registrarCliente(conn)
-
-		fmt.Println("Novo cliente conectado:", endereco)
-
-		// Cada conexão é processada em uma goroutine para permitir múltiplos clientes simultâneos.
 		go s.readLoop(conn)
 	}
 }
 
-// Inicializar os Postos com latitude e longitude em um certo intervako
-// Criar um ID Unico pro cliente e pro posto.
-
-
-func (s *Server) registrarCliente(conn net.Conn) {
-	endereco := conn.RemoteAddr().String()
-	clientes := make(map[string]Cliente)
-
-	data, err := os.ReadFile("Clients/ClientesConectados.json")
-	if err == nil {
-		_ = json.Unmarshal(data, &clientes)
+func contains(lista []string, item string) bool {
+	for _, v := range lista {
+		if v == item {
+			return true	
+		}
 	}
-
-	clientes[endereco] = Cliente{
-		SaldoDevedor:       make(map[string]float64),
-		ExtratoDePagamento: make(map[string]float64),
-	}
-
-	clientesJSON, err := json.MarshalIndent(clientes, "", "  ")
-	if err != nil {
-		fmt.Println("Erro ao serializar clientes:", err)
-		return
-	}
-
-	_ = os.MkdirAll("Clients", 0755)
-	err = os.WriteFile("Clients/ClientesConectados.json", clientesJSON, 0644)
-	if err != nil {
-		fmt.Println("Erro ao escrever arquivo JSON:", err)
-	}
+	return false
 }
 
 func (s *Server) readLoop(conn net.Conn) {
 	defer func() {
-		// s.mu.Lock()
-		// delete(s.clients, conn.RemoteAddr())
-		// s.mu.Unlock()
 		fmt.Println("Cliente desconectado:", conn.RemoteAddr())
 		conn.Close()
 	}()
@@ -163,6 +135,8 @@ func (s *Server) readLoop(conn net.Conn) {
 	for {	
 		mens_receb, err := s.receber_mensagem(conn)
 		if err != nil {
+
+			// SEMPRE QUE O PONTO SE CONECTA ESSE IF É EXECUTADO
 			fmt.Println("Erro ao receber mensagem:", err)
 			return
 		}
@@ -175,21 +149,34 @@ func (s *Server) readLoop(conn net.Conn) {
 			conn.Write([]byte("Comando inválido\n"))
 			continue
 		}
-		if (partes.){
+
+		if contains(partes, "Carro") {
 			switch partes[0] {
 			case "Pontos":
-				if len(partes) != 4 {
-					conn.Write([]byte("ERRO: Formato deve ser 'Pontos latitude longitude'\n"))
+				if len(partes) != 5 {  // Corrigido para 5 (Pontos, lat, long, bateria)
+					conn.Write([]byte("ERRO: Formato deve ser 'Pontos latitude longitude bateria'\n"))
 					continue
 				}
-	
-				mapPontos, err := s.buscaPontosDeRecarga()
+
+				latitude, err := strconv.ParseFloat(partes[1], 64)
 				if err != nil {
-					conn.Write([]byte("ERRO: Não foi possível obter pontos de recarga\n"))
+					conn.Write([]byte("Erro: Latitude inválida\n"))
+					continue
+				}
+
+				longitude, err := strconv.ParseFloat(partes[2], 64)
+				if err != nil {
+					conn.Write([]byte("Erro: Longitude inválida\n"))
+					continue
+				}
+
+				bateria, err := strconv.Atoi(partes[3])
+				if err != nil {
+					conn.Write([]byte("Erro: Bateria inválida\n"))
 					continue
 				}
 	
-				s.processaSolicitacaoPontos(conn, partes, mapPontos)
+				s.processaSolicitacaoPontos(conn, bateria, latitude, longitude)
 			case "Sair":
 				fmt.Println("Cliente solicitou desconexão:", conn.RemoteAddr())
 				return
@@ -198,48 +185,58 @@ func (s *Server) readLoop(conn net.Conn) {
 			}
 		}
 
-		if (partes[3] == "Posto"){
-			// O POSTO ENVIA A DISPONIBILIDADE FREQUENTEMENTE OU POR DEMANDA.
+		if contains(partes, "Posto") {
 			fmt.Println("Olá posto!")
-			
 		}
-		
 	}
 }
 
+func (s *Server) buscaPontosDeRecarga(bateria int, latitude float64, longitude float64) ([]Ponto, error) {
+	mensagem := fmt.Sprintf("Pontos %d %.6f %.6f", bateria, latitude, longitude)
+	buffer := make([]byte, 4096)
+	var pontos []Ponto
 
-// Só precisa ser executado uma vez para obter a localização dos pontos. Essa é a função que retorna a requisição do cliente. Ordem buscaPontosDeRecarga -> distanciaEntrePontos -> enviaMelhoresOpcoesDePontos
-func (s *Server) buscaPontosDeRecarga() (map[string]Ponto, error) {
-	// Buscar todos os postos que estão conectados ao servidor. Nesse caso vou ter que registrar a cada container posto criado.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	jsonPontos, err := os.Open("Pontos.json")
-	if err != nil {
-		return nil, fmt.Errorf("falha ao abrir arquivo JSON: %w", err)
+	for id, conn := range s.pontos {
+		_, err := conn.Write([]byte(mensagem + "\n"))
+		if err != nil {
+			fmt.Printf("Erro ao enviar mensagem para ponto %d: %v\n", id, err)
+			continue
+		}
+
+		dados, err := conn.Read(buffer)
+		if err != nil {
+			fmt.Printf("Erro ao ler resposta do ponto %d: %v\n", id, err)
+			continue
+		}
+
+		var ponto Ponto
+		resposta := string(buffer[:dados])
+		err = json.Unmarshal([]byte(resposta), &ponto)
+		if err != nil {
+			fmt.Printf("Erro ao decodificar resposta do ponto %d: %v\n", id, err)
+			continue
+		}
+		ponto.Conn = conn
+		pontos = append(pontos, ponto)
 	}
-	defer jsonPontos.Close()
 
-	byteValueJson, err := io.ReadAll(jsonPontos)
-	if err != nil {
-		return nil, fmt.Errorf("falha ao ler arquivo JSON: %w", err)
+	if len(pontos) == 0 {
+		return nil, fmt.Errorf("nenhum ponto disponível")
 	}
 
-	pontoMap := make(map[string]Ponto)
-	if err := json.Unmarshal(byteValueJson, &pontoMap); err != nil {
-		return nil, fmt.Errorf("falha ao decodificar JSON: %w", err)
-	}
-
-	return pontoMap, nil
+	return pontos, nil
 }
 
-// AS FUNÇÕES QUE FAZEM O CÁLCULO DEVEM SER RESPONSABILIDADE DOS PONTOS 
-
-func distanciaEntrePontos(posicaoVeiculo *Coodernadas, posicaoPosto *Coodernadas) float64 {
+func distanciaEntrePontos(posicaoVeiculo *Coordenadas, posicaoPosto *Coordenadas) float64 {
 	const earthRadius = 6371000
 
-	latVeiculo := posicaoVeiculo.latitude * math.Pi / 180
-	lonVeiculo := posicaoVeiculo.longitude * math.Pi / 180
-	latPosto := posicaoPosto.latitude * math.Pi / 180
-	lonPosto := posicaoPosto.longitude * math.Pi / 180
+	latVeiculo := posicaoVeiculo.Latitude * math.Pi / 180
+	lonVeiculo := posicaoVeiculo.Longitude * math.Pi / 180
+	latPosto := posicaoPosto.Latitude * math.Pi / 180
+	lonPosto := posicaoPosto.Longitude * math.Pi / 180
 
 	dLat := latPosto - latVeiculo
 	dLon := lonPosto - lonVeiculo
@@ -252,61 +249,44 @@ func distanciaEntrePontos(posicaoVeiculo *Coodernadas, posicaoPosto *Coodernadas
 	return earthRadius * c
 }
 
-// Ordenar e assim definir as melhores opções. No momento só considero as melhores opções a partir da distância, não levando em consideração o tempo de espera.
-
-func (s *Server) enviaMelhoresOpcoesDePontos(latitudeVeiculo float64, longitudeVeiculo float64, mapPonto map[string]Ponto) map[string]float64 {
-	posicaoVeiculo := Coodernadas{latitude: latitudeVeiculo, longitude: longitudeVeiculo}
-	opcoesPontos := make(map[string]float64)
-
-	for id, p := range mapPonto {
-		posicaoPosto := Coodernadas{latitude: p.latitude, longitude: p.longitude}
-		opcoesPontos[id] = distanciaEntrePontos(&posicaoVeiculo, &posicaoPosto)
-	}
-	return opcoesPontos
+func sortPontosByDistance(pontos []Ponto, latVeiculo, lonVeiculo float64) []Ponto {
+	posVeiculo := Coordenadas{Latitude: latVeiculo, Longitude: lonVeiculo}
+	
+	sort.SliceStable(pontos, func(i, j int) bool {
+		posI := Coordenadas{Latitude: pontos[i].Latitude, Longitude: pontos[i].Longitude}
+		posJ := Coordenadas{Latitude: pontos[j].Latitude, Longitude: pontos[j].Longitude}
+		return distanciaEntrePontos(&posVeiculo, &posI) < distanciaEntrePontos(&posVeiculo, &posJ)
+	})
+	
+	return pontos
 }
 
 func (s *Server) handleMessages() {
-	for msg := range s.msgch { // Lê mensagens do canal msgch
+	for msg := range s.msgch {
 		fmt.Println("Mensagem processada:", string(msg))
-
-		// Envia uma resposta de volta ao cliente
-		// Aqui, o servidor envia uma confirmação após processar a mensagem
-		// Assumindo que o servidor mantém a conexão com o cliente aberta
 		fmt.Println("Enviando resposta ao cliente:", "Mensagem recebida: "+string(msg))
 	}
 }
 
-func (s *Server) processaSolicitacaoPontos(cliente net.Conn, partes []string, mapPonto map[string]Ponto) {
-	if len(partes) != 4 {
-		cliente.Write([]byte("Erro: Formato inválido\n"))
-		return
-	}
-
-	latitude, err := strconv.ParseFloat(partes[1], 64)
+func (s *Server) processaSolicitacaoPontos(conn net.Conn, bateria int, latitude float64, longitude float64) {
+	pontos, err := s.buscaPontosDeRecarga(bateria, latitude, longitude)
 	if err != nil {
-		cliente.Write([]byte("Erro: Latitude inválida\n"))
+		conn.Write([]byte("ERRO: " + err.Error() + "\n"))
 		return
 	}
 
-	longitude, err := strconv.ParseFloat(partes[2], 64)
+	pontosOrdenados := sortPontosByDistance(pontos, latitude, longitude)
+
+	jsonPontos, err := json.Marshal(pontosOrdenados)
 	if err != nil {
-		cliente.Write([]byte("Erro: Longitude inválida\n"))
+		conn.Write([]byte("Erro ao processar resposta\n"))
 		return
 	}
 
-	pontos := s.enviaMelhoresOpcoesDePontos(latitude, longitude, mapPonto)
-
-	jsonPontos, err := json.Marshal(pontos)
-	if err != nil {
-		cliente.Write([]byte("Erro ao processar resposta\n"))
-		return
-	}
-
-	cliente.Write(append(jsonPontos, '\n'))
+	conn.Write(append(jsonPontos, '\n'))
 }
 
-
 func main() {
-	server := NewServer(":3000") // Cria um servidor escutando na porta 3000
+	server := NewServer(":3000")
 	log.Fatal(server.Start())
 }

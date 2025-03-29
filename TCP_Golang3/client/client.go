@@ -25,7 +25,9 @@ type Client struct {
 // Construtor para criar um novo cliente
 func NewClient(host string, port string) (*Client, error) {
 	address := net.JoinHostPort(host, port)
+	// Tag de Cliente no Address?
 	conn, err := net.Dial("tcp", address)
+	fmt.Fprintln(conn, "client")
 	if err != nil {
 		return nil, err
 	}
@@ -53,8 +55,7 @@ func (c *Client) Send(message string) error {
 // Solicitar pontos de recarga ao servidor
 func (c *Client) solicitaPontos() error {
 	// Formata os parâmetros para string
-	mensagem := fmt.Sprintf("Pontos %.6f %.6f Carro\n ", c.latitude, c.longitude)
-
+	mensagem := fmt.Sprintf("Pontos %.6f %.6f Carro %d\n", c.latitude, c.longitude, c.bateria)
 	// Enviar dados
 	err := c.Send(mensagem)
 	if err != nil {

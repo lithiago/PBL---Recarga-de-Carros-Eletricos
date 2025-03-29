@@ -16,6 +16,7 @@ type Ponto struct {
 func NewPosto(host string, port string) (*Ponto, error) {
 	address := net.JoinHostPort(host, port)
 	conn, err := net.Dial("tcp", address)
+	fmt.Fprintln(conn, "ponto")
 	if err != nil {
 		return nil, err
 	}
