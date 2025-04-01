@@ -77,6 +77,33 @@ func (c *Ponto) solicitaPontos() error {
 	return nil
 }
 
+// Manter a conexão ativa e processar solicitações
+func (c *Ponto) manterConexao() {
+	for {
+		// Solicitar pontos de recarga periodicamente
+		err := c.solicitaPontos()
+		if err != nil {
+			fmt.Println("Erro ao enviar solicitação de ponto:", err)
+			break
+		}
+
+		// Esperar um intervalo antes de enviar novamente
+		time.Sleep(5 * time.Second) // Ajuste o tempo conforme necessário
+
+		// Ler a resposta do servidor, se houver
+		resposta, err := c.receberSolicitacao()
+		if err != nil {
+			fmt.Println("Erro ao receber solicitação:", err)
+			break
+		}
+
+		// Se o servidor enviar algo, você pode processar ou exibir a resposta
+		if resposta != "" {
+			fmt.Println("Resposta do servidor:", resposta)
+		}
+	}
+}
+
 func main() {
 	// Criar um novo ponto
 	ponto, err := NewPosto("server", "3000")
