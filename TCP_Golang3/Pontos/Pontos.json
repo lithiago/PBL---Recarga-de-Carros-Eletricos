@@ -1,0 +1,22 @@
+{
+    "Ponto de Recarga 001": {
+        "latitude": 5.9,
+        "longitude": 6.0,
+        "fila": [],
+        "disponibilidade": true
+    },
+
+    "Ponto de Recarga 002": {
+        "latitude": 4.0,
+        "longitude": 3.0,
+        "fila": [],
+        "disponibilidade": true
+    },
+
+    "Ponto de Recarga 003": {
+        "latitude": 1.0,
+        "longitude": 0.5,
+        "fila": [],
+        "disponibilidade": true
+    }
+}   
