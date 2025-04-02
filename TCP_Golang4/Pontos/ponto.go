@@ -18,6 +18,12 @@ type Ponto struct {
 	disponibilidade bool
 }
 
+type ReqPontoDeRecarga struct{
+	Bateria  int
+	Latitude float64
+	Longitude  float64
+}
+
 type Coordenadas struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
@@ -64,7 +70,24 @@ func (c *Ponto) receberSolicitacao() (string, error) {
 
 	return resposta, nil
 }
-
+// Essa função recebe os dados e não desserializa para string. Mantém o formato JSON
+func (c *Ponto) receberDados() ([]byte, error) {
+    buffer := make([]byte, 4096)
+    dados, err := c.conn.Read(buffer)
+    if err != nil {
+        return nil, fmt.Errorf("erro ao ler resposta do servidor: %v", err)
+    }
+    return buffer[:dados], nil
+}
+func (c *Ponto) JSONDadosDeVeiculos(dados []byte)(ReqPontoDeRecarga, error){
+	var dadosJSON ReqPontoDeRecarga
+	err := json.Unmarshal(dados, &dadosJSON)
+	if err != nil {
+        return dadosJSON, fmt.Errorf("erro ao decodificar JSON: %v", err)
+    }
+	return dadosJSON, nil
+	
+}
 func (ponto *Ponto) distanciaEntrePontos(posicaoVeiculo Coordenadas) float64 {
 	const earthRadius = 6371000
 
@@ -96,7 +119,7 @@ func (c *Ponto) calcularTempoDeEspera(latCliente float64, longCliente float64, b
 
 
 // Indicar Disponibilidade e fila
-func (c *Ponto) retornaPontos(latCliente float64, longCliente float64, bateria int) error {
+func (c *Ponto) retornaPonto(latCliente float64, longCliente float64, bateria int) error {
 	// Corrigir a função calcularTempoDeEspera para retornar valores
 	tempoMaximo, distancia := c.calcularTempoDeEspera(latCliente, longCliente, bateria)
 
@@ -144,9 +167,27 @@ func limparTela() {
 }
 func (c *Ponto) trocaDeMensagens(){
 	for{
-		c.receberSolicitacao()
-		fmt.Println("Posto Disponível para recarga!")
-		
+		resp, err := c.receberSolicitacao()
+		if err != nil {
+			fmt.Println("Erro:", err)
+			return
+		}
+		// Primeiro ele deve receber a solicitação de localização. Depois ele deve receber os parâmetros do cliente. Ou talvez fique melhor se enviar todos os dados de uma vez?
+		if resp == "Localizacao"{
+			dadosSerializados, err := c.receberDados()
+			if err != nil {
+				fmt.Println("erro ao receber dados:", err)
+			}
+			dadosVeiculo, err := c.JSONDadosDeVeiculos(dadosSerializados)
+			if err != nil {
+				fmt.Println("erro ao receber dados:", err)
+			}
+			c.retornaPonto(dadosVeiculo.Latitude, dadosVeiculo.Longitude, dadosVeiculo.Bateria)
+			continue
+		}
+		if resp == "Reserva"{
+			
+		}
 	}
 }
 func main() {

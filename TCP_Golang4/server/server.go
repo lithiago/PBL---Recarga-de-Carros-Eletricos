@@ -142,8 +142,6 @@ func (s *Server) readLoop(conn net.Conn) {
 	for {	
 		mens_receb, err := s.receber_mensagem(conn)
 		if err != nil {
-
-			// SEMPRE QUE O PONTO SE CONECTA ESSE IF É EXECUTADO
 			fmt.Println("Erro ao receber mensagem:", err)
 			return
 		}
@@ -199,7 +197,7 @@ func (s *Server) readLoop(conn net.Conn) {
 }
 
 func (s *Server) buscaPontosDeRecarga(bateria int, latitude float64, longitude float64) ([]Ponto, error) {
-	// Estrutura para a requisição
+	// Estrutura para a requisição ao Ponto de Recarga nela contém os dados que o ponto precisa.
 	req := ReqPontoDeRecarga{
 		Bateria:  bateria,
 		Latitude: latitude,
@@ -218,15 +216,14 @@ func (s *Server) buscaPontosDeRecarga(bateria int, latitude float64, longitude f
 	s.mu.Lock()  // Protege o acesso ao mapa de conexões
 	defer s.mu.Unlock()
 
-	// Envia a mensagem de "Reservar Ponto" para cada ponto de recarga
+	// Envia a mensagem de "Localização" para cada ponto de recarga
 	for id, conn := range s.pontos {
 		// Enviar a mensagem de reserva
-		_, err := conn.Write([]byte("Reservar Ponto\n"))
+		_, err := conn.Write([]byte("Localizacao\n"))
 		if err != nil {
 			fmt.Printf("Erro ao enviar mensagem de reserva para ponto %d: %v\n", id, err)
 			continue
 		}
-
 		// Enviar a mensagem serializada com os dados de bateria, latitude e longitude
 		_, err = conn.Write(append(mensagem, '\n'))  // Adiciona nova linha para indicar fim da mensagem
 		if err != nil {
@@ -264,24 +261,6 @@ func (s *Server) buscaPontosDeRecarga(bateria int, latitude float64, longitude f
 }
 
 
-func distanciaEntrePontos(posicaoVeiculo *Coordenadas, posicaoPosto *Coordenadas) float64 {
-	const earthRadius = 6371000
-
-	latVeiculo := posicaoVeiculo.Latitude * math.Pi / 180
-	lonVeiculo := posicaoVeiculo.Longitude * math.Pi / 180
-	latPosto := posicaoPosto.Latitude * math.Pi / 180
-	lonPosto := posicaoPosto.Longitude * math.Pi / 180
-
-	dLat := latPosto - latVeiculo
-	dLon := lonPosto - lonVeiculo
-
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(latVeiculo)*math.Cos(latPosto)*
-			math.Sin(dLon/2)*math.Sin(dLon/2)
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-
-	return earthRadius * c
-}
 
 func sortPontosByDistance(pontos []Ponto, latVeiculo, lonVeiculo float64) []Ponto {
 	posVeiculo := Coordenadas{Latitude: latVeiculo, Longitude: lonVeiculo}
@@ -302,7 +281,7 @@ func (s *Server) handleMessages() {
 	}
 }
 
-func (s *Server) processaSolicitacaoPontos(conn net.Conn, bateria int, latitude float64, longitude float64) {
+ func (s *Server) processaSolicitacaoPontos(conn net.Conn, bateria int, latitude float64, longitude float64) {
 	pontos, err := s.buscaPontosDeRecarga(bateria, latitude, longitude)
 	if err != nil {
 		conn.Write([]byte("ERRO: " + err.Error() + "\n"))
@@ -318,7 +297,7 @@ func (s *Server) processaSolicitacaoPontos(conn net.Conn, bateria int, latitude 
 	}
 
 	conn.Write(append(jsonPontos, '\n'))
-}
+} 
 
 func main() {
 	server := NewServer(":3000")
