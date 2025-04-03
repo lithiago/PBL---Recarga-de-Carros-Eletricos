@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -22,25 +24,23 @@ type Client struct {
 	latitude  float64
 	longitude float64
 	bateria   int
-	mutex sync.Mutex
-	msgChan chan Mensagem
+	mutex     sync.Mutex
+	msgChan   chan Mensagem
 }
 
-type PontosDeRecarga struct{
+type PontosDeRecarga struct {
 	Localizacao []PontoRecarga
 }
 
-
-
 type PontoRecarga struct {
-    ID        string  `json:"id"`
-    Nome      string  `json:"nome"`
-    Distancia float64 `json:"distancia"`
-    Disponivel bool    `json:"disponivel"`
+	ID         string  `json:"id"`
+	Nome       string  `json:"nome"`
+	Distancia  float64 `json:"distancia"`
+	Disponivel bool    `json:"disponivel"`
 }
 
-type Mensagem struct{
-	Tipo string `json:"tipo"`
+type Mensagem struct {
+	Tipo     string          `json:"tipo"`
 	Conteudo json.RawMessage `json:"conteudo"`
 }
 
@@ -54,18 +54,34 @@ func NewClient(host string, port string) (*Client, error) {
 		return nil, err
 	}
 
+	// Cria um novo gerador de números aleatórios
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// Define o intervalo para latitude e longitude
+	minLat, maxLat := -23.6, -23.5   // Exemplo de intervalo para latitude
+	minLong, maxLong := -46.7, -46.6 // Exemplo de intervalo para longitude
+
+	// Gera valores aleatórios para latitude e longitude
+	Latitude := randomInRange(r, minLat, maxLat)
+	Longitude := randomInRange(r, minLong, maxLong)
+
 	return &Client{
 		conn:      conn,
 		reader:    bufio.NewReader(conn),
 		writer:    bufio.NewWriter(conn),
-		latitude:  -23.5505, // Exemplo: São Paulo
-		longitude: -46.6333, // Exemplo: São Paulo
+		latitude:  Latitude,
+		longitude: Longitude,
 	}, nil
 }
 
 // Fechar conexão
 func (c *Client) Close() {
 	c.conn.Close()
+}
+
+// Função para gerar um número aleatório dentro de um intervalo
+func randomInRange(r *rand.Rand, min, max float64) float64 {
+	return min + r.Float64()*(max-min)
 }
 
 // Enviar mensagem para o servidor
@@ -114,10 +130,10 @@ func (c *Client) receberPontos() (map[string]float64, error) {
 	return mapaPontos, nil
 }
 
-func (c *Client) solicitarReserva(ponto string){
-	type Mensagem struct{
+func (c *Client) solicitarReserva(ponto string) {
+	type Mensagem struct {
 		PontoEscolhido string
-		Cliente Client
+		Cliente        Client
 	}
 	msg := Mensagem{PontoEscolhido: ponto, Cliente: *c}
 	dados, err := json.Marshal(msg)
@@ -127,51 +143,101 @@ func (c *Client) solicitarReserva(ponto string){
 	c.Send(string(dados))
 }
 
-
-
-// Como essa função vai se tratar de uma Goroutine é preciso que um contexto seja passado. E em go 
+// Como essa função vai se tratar de uma Goroutine é preciso que um contexto seja passado. E em go
 func (c *Client) monitorarBateria(contexto context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	for{
+	for {
 		select {
-		case <- contexto.Done():
+		case <-contexto.Done():
 			return
-		case <- ticker.C:
-			// Como outras rotinas compartilham o atributo Bateria, o mutex se torna necessário para evitar condições de corrida. Garantindo então que a Bateria seja acessado somente por uma rotina por vez
+		case <-ticker.C:
 			c.mutex.Lock()
 			bateriaAtual := c.bateria
 			c.mutex.Unlock()
+
 			if bateriaAtual <= 20 {
 				fmt.Println("\n⚠️ Bateria crítica! Enviando solicitação ao servidor...")
 				if err := c.solicitaPontos(); err != nil {
 					fmt.Println("Erro ao solicitar pontos:", err)
 				}
-				
+
 				// Diminui a bateria mais lentamente após o alerta
 				c.mutex.Lock()
 				if c.bateria > 5 { // Não deixa a bateria zerar
 					c.bateria -= 2
 				}
 				c.mutex.Unlock()
-			
-		} else {
-			c.mutex.Lock()
-			c.bateria -= 5
-			c.mutex.Unlock()
+
+			} else {
+				c.mutex.Lock()
+				c.bateria -= 5
+				c.mutex.Unlock()
 			}
 		}
 	}
 }
 
-func (c *Client) iniciarRecarga(){
+// Função para movimentar o carro
+// Quando finalizar a recarga volta a movimentar o carro
+func (c *Client) movimentarCarro(ctx context.Context) {
+	// Definindo a velocidade do carro (em km/h)
+	const velocidade = 10.0 // Velocidade constante
+	const intervalo = 1.0   // Intervalo de tempo em segundos para movimentação
+
+	// Gerador de números aleatórios
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// Movimentação aleatória até a bateria ficar crítica
+	for {
+		select {
+		case <-ctx.Done():
+			return // Sai da goroutine se o contexto for cancelado
+		default:
+			if c.bateria > 20 {
+				// Gera uma direção aleatória
+				direcao := r.Float64() * 360 // Direção em graus
+
+				// Simula a movimentação
+				c.latitude += velocidade * (math.Cos(direcao*math.Pi/180) * intervalo / 100)  // Atualiza latitude
+				c.longitude += velocidade * (math.Sin(direcao*math.Pi/180) * intervalo / 100) // Atualiza longitude
+
+				// Espera o intervalo
+				time.Sleep(time.Duration(intervalo * float64(time.Second))) // Espera o intervalo
+			} else {
+				// Se a bateria estiver crítica, pode-se sair do loop ou parar a movimentação
+				break
+			}
+		}
+	}
+}
+
+func (c *Client) movimentarParaPonto(latitudePonto, longitudePonto float64) {
+	// Simula a movimentação em direção ao ponto de recarga
+	for c.latitude != latitudePonto || c.longitude != longitudePonto {
+		// Calcula a direção para o ponto de recarga
+		direcao := math.Atan2(longitudePonto-c.longitude, latitudePonto-c.latitude) * 180 / math.Pi
+
+		// Atualiza a posição do carro
+		c.latitude += 0.01 * (math.Cos(direcao * math.Pi / 180))  // Ajuste a taxa de movimento
+		c.longitude += 0.01 * (math.Sin(direcao * math.Pi / 180)) // Ajuste a taxa de movimento
+
+		// Espera um pouco antes de continuar a movimentação
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Ao chegar no ponto de recarga, iniciar o processo de recarga
+	c.iniciarRecarga()
+}
+
+func (c *Client) iniciarRecarga() {
 	//
 }
 
-func (c *Client) processarMensagens(msg Mensagem){
+func (c *Client) processarMensagens(msg Mensagem) {
 	for {
-		
+
 		switch msg.Tipo {
 		case "PONTOS":
 			var pontos []PontoRecarga
@@ -209,7 +275,6 @@ func (c *Client) mostrarStatusReserva(status bool) {
 	}
 }
 
-
 func (c *Client) receberMensagem(ctx context.Context) {
 	go func() {
 		for {
@@ -234,6 +299,7 @@ func (c *Client) receberMensagem(ctx context.Context) {
 		}
 	}()
 }
+
 // Loop de interação do cliente com o servidor
 func (c *Client) trocaDeMensagens() {
 	contexto, cancel := context.WithCancel(context.Background())
@@ -243,13 +309,13 @@ func (c *Client) trocaDeMensagens() {
 
 	for {
 
-		select{
-		case <- contexto.Done():
+		select {
+		case <-contexto.Done():
 			return
 		case msg := <-c.msgChan:
 			c.processarMensagens(msg)
 		default:
-		
+
 			fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -303,11 +369,10 @@ func main() {
 	client.trocaDeMensagens()
 }
 
-
-/* A ideia central é usar goroutines para deixar seu programa fazendo várias coisas ao mesmo tempo de forma eficiente, sem travar. Imagine seu sistema de recarga de carros elétricos: enquanto o usuário está vendo o menu, o programa pode estar checando o nível da bateria em segundo plano e também ouvindo mensagens do servidor. 
+/* A ideia central é usar goroutines para deixar seu programa fazendo várias coisas ao mesmo tempo de forma eficiente, sem travar. Imagine seu sistema de recarga de carros elétricos: enquanto o usuário está vendo o menu, o programa pode estar checando o nível da bateria em segundo plano e também ouvindo mensagens do servidor.
 
 Quando a bateria ficar baixa, o sistema automaticamente avisa o servidor sem precisar que o usuário faça nada. Se o servidor mandar uma lista de postos de recarga, isso aparece na tela sem congelar a interface. Tudo acontece de forma fluida, como um bom aplicativo de celular que continua respondendo mesmo quando está carregando dados.
 
-A mágica está em dividir o trabalho em tarefas menores que rodam paralelamente: uma cuida da bateria, outra fica ouvindo o servidor, outra processa os dados recebidos. O contexto serve como um interruptor geral - se precisar fechar o programa, todas essas tarefas são avisadas para encerrar limpasmente, sem deixar nada pendurado. 
+A mágica está em dividir o trabalho em tarefas menores que rodam paralelamente: uma cuida da bateria, outra fica ouvindo o servidor, outra processa os dados recebidos. O contexto serve como um interruptor geral - se precisar fechar o programa, todas essas tarefas são avisadas para encerrar limpasmente, sem deixar nada pendurado.
 
 É como ter vários assistentes trabalhando juntos, cada um com sua função, mas coordenados pelo mesmo chefe (o contexto). Isso torna seu sistema mais rápido, responsivo e profissional, especialmente importante quando lida com operações de rede que podem demorar ou falhar. */
