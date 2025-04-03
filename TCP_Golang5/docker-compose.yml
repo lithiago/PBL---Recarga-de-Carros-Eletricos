@@ -1,0 +1,37 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - go-network
+    volumes:
+      - ./Pontos/Pontos.json:/app/Pontos.json
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    networks:
+      - go-network
+    depends_on:
+      - server
+    stdin_open: true
+    tty: true
+
+  ponto:
+    build:
+      context: .
+      dockerfile: Pontos/Dockerfile
+    networks:
+      - go-network
+    depends_on:
+      - server
+    stdin_open: true
+    tty:  true
+
+networks:
+  go-network:
+    driver: bridge
