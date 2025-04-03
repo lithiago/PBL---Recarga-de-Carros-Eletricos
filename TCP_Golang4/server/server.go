@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"log"
-	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -209,7 +208,7 @@ func (s *Server) buscaPontosDeRecarga(bateria int, latitude float64, longitude f
 	if err != nil {
 		return nil, fmt.Errorf("erro ao serializar mensagem: %v", err)
 	}
-	
+
 	buffer := make([]byte, 4096)  // Buffer para leitura da resposta
 	var pontos []Ponto  // Lista de pontos que serão retornados
 
