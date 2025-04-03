@@ -8,17 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 )
 
 type Ponto struct {
 	conn            net.Conn
 	latitude        float64
 	longitude       float64
-	fila            []string
+	fila            []Carro
 	disponibilidade bool
 }
 
-type ReqPontoDeRecarga struct{
+type Carro struct{
+	conn net.Conn
 	Bateria  int
 	Latitude float64
 	Longitude  float64
@@ -28,8 +30,11 @@ type Coordenadas struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 }
-
-
+// Formato de mensagem para retornar ao servidor
+type Mensagem struct {
+	Carro Carro
+	Texto string
+}
 func NewPosto(host string, port string) (*Ponto, error) {
 	address := net.JoinHostPort(host, port)
 	conn, err := net.Dial("tcp", address)
@@ -79,8 +84,8 @@ func (c *Ponto) receberDados() ([]byte, error) {
     }
     return buffer[:dados], nil
 }
-func (c *Ponto) JSONDadosDeVeiculos(dados []byte)(ReqPontoDeRecarga, error){
-	var dadosJSON ReqPontoDeRecarga
+func (c *Ponto) JSONDadosDeVeiculos(dados []byte)(Carro, error){
+	var dadosJSON Carro
 	err := json.Unmarshal(dados, &dadosJSON)
 	if err != nil {
         return dadosJSON, fmt.Errorf("erro ao decodificar JSON: %v", err)
@@ -115,6 +120,50 @@ func (c *Ponto) calcularTempoDeEspera(latCliente float64, longCliente float64, b
 	tempo := distancia / 13.8
 	tempoMaximo := tempo + float64(len(c.fila))
 	return tempoMaximo, distancia
+}
+
+// Reserva 
+func (c *Ponto) reservarVaga(cliente Carro) {
+
+	c.fila = append(c.fila, cliente)
+	// Converter tamanho da fila para string e enviar
+	texto := fmt.Sprintf("%d\n", len(c.fila) - 1)
+	mensagemStruct := Mensagem{Carro: cliente, Texto: texto}
+	mensagem := serializarMensagem(mensagemStruct)
+	// Enviar mensagem para o servidor
+	_, err := c.conn.Write(append(mensagem, '\n'))
+	if err != nil {
+		fmt.Println("Erro ao enviar mensagem:", err)
+	}
+}
+
+func serializarMensagem(m Mensagem) ([]byte) {
+    dados, err := json.Marshal(m) 
+    if err != nil {
+        fmt.Println("Erro ao serializar mensagem:", err)
+    }
+    return dados
+}
+
+func (c *Ponto) iniciarRecarga(cliente Carro) {
+	// Simular a recarga da bateria
+	for i := cliente.Bateria; i < 100; i++ {
+		time.Sleep(1 * time.Second) // Espera 1 segundo a cada iteração
+		cliente.Bateria = i + 1
+	}
+
+	// Criar e serializar a mensagem
+	mensagemStruct := Mensagem{Texto: "Recarga Concluída", Carro: cliente}
+	mensagem:= serializarMensagem(mensagemStruct)
+
+	// Enviar mensagem para o servidor
+	_, err := c.conn.Write(append(mensagem, '\n'))
+	if err != nil {
+		fmt.Println("Erro ao enviar mensagem:", err)
+	}
+	
+	c.fila = append(c.fila[:0], c.fila[1:]...)
+
 }
 
 
@@ -186,7 +235,15 @@ func (c *Ponto) trocaDeMensagens(){
 			continue
 		}
 		if resp == "Reserva"{
-			
+			dadosSerializados, err := c.receberDados()
+			if err != nil {
+				fmt.Println("erro ao receber dados:", err)
+			}
+			dadosVeiculo, err := c.JSONDadosDeVeiculos(dadosSerializados)
+			if err != nil {
+				fmt.Println("erro ao receber dados:", err)
+			}
+			c.reservarVaga(dadosVeiculo)
 		}
 	}
 }
