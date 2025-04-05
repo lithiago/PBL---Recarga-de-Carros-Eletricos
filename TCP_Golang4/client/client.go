@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
 )
 
 // Estrutura do Cliente
@@ -24,64 +25,88 @@ type Client struct {
 	latitude  float64
 	longitude float64
 	bateria   int
-	mutex     sync.Mutex
-	msgChan   chan Mensagem
+	mutex sync.Mutex
+	msgChan chan Mensagem
 }
 
-type PontosDeRecarga struct {
+type PontosDeRecarga struct{
 	Localizacao []PontoRecarga
 }
 
+
+
 type PontoRecarga struct {
-	ID         string  `json:"id"`
-	Nome       string  `json:"nome"`
-	Distancia  float64 `json:"distancia"`
-	Disponivel bool    `json:"disponivel"`
+	Conn net.Conn
+    Distancia float64 `json:"distancia"`
+    Disponivel bool    `json:"disponivel"`
+    Latitude float64    `json:"latitude"`
+    Longitude float64    `json:"longitude"`
+
 }
 
-type Mensagem struct {
-	Tipo     string          `json:"tipo"`
-	Conteudo json.RawMessage `json:"conteudo"`
+type Mensagem struct{
+	Tipo string `json:"tipo"`
+	Conteudo []byte `json:"conteudo"`
+	OrigemMensagem string `json:"origemmensagem"`
 }
 
 // Construtor para criar um novo cliente
 func NewClient(host string, port string) (*Client, error) {
 	address := net.JoinHostPort(host, port)
-	// Tag de Cliente no Address?
 	conn, err := net.Dial("tcp", address)
-	fmt.Fprintln(conn, "client")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao conectar ao servidor: %v", err)
 	}
 
-	// Cria um novo gerador de números aleatórios
+	type MensagemInicializacao struct {
+		Msg string `json:"msg"`
+	}
+	
+	mensagemInicial := MensagemInicializacao{Msg: "Inicio de Conexão"}
+	conteudoJSON, err := json.Marshal(mensagemInicial)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao serializar mensagem inicial: %v", err)
+	}
+
+	req := Mensagem{
+		Tipo:           "Conexao",
+		Conteudo:       conteudoJSON,
+		OrigemMensagem: "CARRO",
+	}
+
+	dados, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao serializar mensagem: %v", err)
+	}
+
+	if _, err := conn.Write(append(dados, '\n')); err != nil {
+		return nil, fmt.Errorf("erro ao enviar mensagem inicial: %v", err)
+	}
+
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	// Define o intervalo para latitude e longitude
-	minLat, maxLat := -23.6, -23.5   // Exemplo de intervalo para latitude
-	minLong, maxLong := -46.7, -46.6 // Exemplo de intervalo para longitude
-
-	// Gera valores aleatórios para latitude e longitude
-	Latitude := randomInRange(r, minLat, maxLat)
-	Longitude := randomInRange(r, minLong, maxLong)
+	minLat, maxLat := -23.6, -23.5
+	minLong, maxLong := -46.7, -46.6
 
 	return &Client{
 		conn:      conn,
 		reader:    bufio.NewReader(conn),
 		writer:    bufio.NewWriter(conn),
-		latitude:  Latitude,
-		longitude: Longitude,
+		latitude:  randomInRange(r, minLat, maxLat),
+		longitude: randomInRange(r, minLong, maxLong),
+		bateria:   100, // Bateria começa cheia
+		msgChan:   make(chan Mensagem, 10),
 	}, nil
+}
+
+
+// Função para gerar um número aleatório dentro de um intervalo
+func randomInRange(r *rand.Rand, min, max float64) float64 {
+	return min + r.Float64()*(max-min)
 }
 
 // Fechar conexão
 func (c *Client) Close() {
 	c.conn.Close()
-}
-
-// Função para gerar um número aleatório dentro de um intervalo
-func randomInRange(r *rand.Rand, min, max float64) float64 {
-	return min + r.Float64()*(max-min)
 }
 
 // Enviar mensagem para o servidor
@@ -92,88 +117,114 @@ func (c *Client) Send(message string) error {
 	return err
 }
 
-// Solicitar pontos de recarga ao servidor
+// Função para solicitar pontos de recarga ao servidor
 func (c *Client) solicitaPontos() error {
+	// Definição da estrutura interna da requisição
+	type ReqPontoDeRecarga struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+
+	// Criar o objeto com os valores
+	req := ReqPontoDeRecarga{
+		Latitude:  c.latitude,
+		Longitude: c.longitude,
+	}
+
+	// Serializar o JSON da requisição
+	conteudoJSON, err := json.Marshal(req)
+	if err != nil {
+		log.Println("Erro ao serializar reserva:", err)
+		return err
+	}
+
+	// Criar a mensagem principal
+	mensagem := Mensagem{
+		Tipo:           "Pontos",
+		Conteudo:       conteudoJSON,
+		OrigemMensagem: "CARRO",
+	}
+
+	// Serializar a mensagem para JSON
+	dados, err := json.Marshal(mensagem)
+	if err != nil {
+		return fmt.Errorf("erro ao serializar mensagem: %v", err)
+	}
+
+	// Garantir que há um delimitador no final para facilitar a leitura do servidor
+	dados = append(dados, '\n')
+
+	// Enviar a mensagem diretamente pelo socket
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	// Formata os parâmetros para string
-	mensagem := fmt.Sprintf("Pontos %.6f %.6f Carro %d\n", c.latitude, c.longitude, c.bateria)
-	// Enviar dados
-	err := c.Send(mensagem)
+	_, err = c.conn.Write(dados) // Escreve diretamente no socket
 	if err != nil {
-		return fmt.Errorf("erro ao enviar solicitação: %v", err)
+		return fmt.Errorf("erro ao enviar dados: %v", err)
 	}
 
 	return nil
 }
 
-// Receber pontos de recarga do servidor
-func (c *Client) receberPontos() (map[string]float64, error) {
-	buffer := make([]byte, 4096)
 
-	// Lê os dados do socket
-	dados, err := c.conn.Read(buffer)
+
+func (c *Client) solicitarReserva(posicaoPonto int, pontos[]PontoRecarga){
+
+	type Reserva struct{
+		Ponto PontoRecarga `json:"ponto"`
+	}
+	reserva := Reserva{Ponto: pontos[posicaoPonto]}
+
+	conteudoJSON, err := json.Marshal(reserva)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao ler resposta do servidor: %v", err)
-	}
-
-	resposta := string(buffer[:dados])
-	fmt.Println(resposta)
-	var mapaPontos map[string]float64
-
-	// Desserializa os dados corretamente
-	err = json.Unmarshal([]byte(resposta), &mapaPontos)
-	if err != nil {
-		return nil, fmt.Errorf("erro ao desserializar JSON: %v", err)
-	}
-
-	return mapaPontos, nil
-}
-
-func (c *Client) solicitarReserva(ponto string) {
-	type Mensagem struct {
-		PontoEscolhido string
-		Cliente        Client
-	}
-	msg := Mensagem{PontoEscolhido: ponto, Cliente: *c}
+        log.Println("Erro ao serializar reserva:", err)
+        
+    }
+	msg := Mensagem{
+        Tipo:     "RESERVA",
+        Conteudo: conteudoJSON,
+    }
 	dados, err := json.Marshal(msg)
-	if err != nil {
-		fmt.Println("Erro ao serializar mensagem:", err)
-	}
-	c.Send(string(dados))
+    if err != nil {
+        log.Println("Erro ao serializar mensagem:", err)
+        return
+    }
+
+    c.Send(string(dados)) // Envia a string JSON pelo socket
 }
 
-// Como essa função vai se tratar de uma Goroutine é preciso que um contexto seja passado. E em go
+
+
+// Como essa função vai se tratar de uma Goroutine é preciso que um contexto seja passado. E em go 
 func (c *Client) monitorarBateria(contexto context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	for {
+	for{
 		select {
-		case <-contexto.Done():
+		case <- contexto.Done():
 			return
-		case <-ticker.C:
+		case <- ticker.C:
+			// Como outras rotinas compartilham o atributo Bateria, o mutex se torna necessário para evitar condições de corrida. Garantindo então que a Bateria seja acessado somente por uma rotina por vez
 			c.mutex.Lock()
 			bateriaAtual := c.bateria
 			c.mutex.Unlock()
-
 			if bateriaAtual <= 20 {
 				fmt.Println("\n⚠️ Bateria crítica! Enviando solicitação ao servidor...")
 				if err := c.solicitaPontos(); err != nil {
 					fmt.Println("Erro ao solicitar pontos:", err)
 				}
-
+				
 				// Diminui a bateria mais lentamente após o alerta
 				c.mutex.Lock()
 				if c.bateria > 5 { // Não deixa a bateria zerar
 					c.bateria -= 2
 				}
 				c.mutex.Unlock()
-
-			} else {
-				c.mutex.Lock()
-				c.bateria -= 5
-				c.mutex.Unlock()
+			
+		} else {
+			c.mutex.Lock()
+			c.bateria -= 5
+			c.mutex.Unlock()
 			}
 		}
 	}
@@ -231,21 +282,25 @@ func (c *Client) movimentarParaPonto(latitudePonto, longitudePonto float64) {
 	c.iniciarRecarga()
 }
 
-func (c *Client) iniciarRecarga() {
+func (c *Client) iniciarRecarga(){
 	//
 }
 
-func (c *Client) processarMensagens(msg Mensagem) {
+func (c *Client) processarMensagens(msg Mensagem){
 	for {
-
+		
 		switch msg.Tipo {
 		case "PONTOS":
 			var pontos []PontoRecarga
+			var opcao int
 			if err := json.Unmarshal(msg.Conteudo, &pontos); err != nil {
 				log.Println("Erro ao decodificar pontos:", err)
 				continue
 			}
 			c.mostrarPontos(pontos)
+			fmt.Print(" 👉 Escolha um Ponto para reservar: ")
+			fmt.Scanln(&opcao)
+			c.solicitarReserva(opcao, pontos)
 
 		case "RESERVA":
 			var reserva struct {
@@ -262,8 +317,10 @@ func (c *Client) processarMensagens(msg Mensagem) {
 
 func (c *Client) mostrarPontos(pontos []PontoRecarga) {
 	fmt.Println("\nPontos de recarga disponíveis:")
+	var i int = 0
 	for _, p := range pontos {
-		fmt.Printf("- %s (%.2f km) - Disponível: %v\n", p.Nome, p.Distancia, p.Disponivel)
+		fmt.Printf("[%d] -> (%.2f Metros) - Disponível: %v\n", i, p.Distancia, p.Disponivel)
+		i +=1
 	}
 }
 
@@ -275,68 +332,95 @@ func (c *Client) mostrarStatusReserva(status bool) {
 	}
 }
 
-func (c *Client) receberMensagem(ctx context.Context) {
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				line, err := c.reader.ReadBytes('\n')
-				if err != nil {
-					log.Println("Erro ao ler:", err)
-					return
-				}
+func (c *Client) receberMensagem() {
+ //   fmt.Println("[DEBUG] Goroutine receberMensagem iniciada!")
 
-				var msg Mensagem
-				if err := json.Unmarshal(line, &msg); err != nil {
-					log.Println("Erro ao decodificar:", err)
-					continue
-				}
+    if c.conn == nil {
+        log.Println("[ERRO] Conexão é nula! Encerrando goroutine.")
+        return
+    }
 
-				c.msgChan <- msg
-			}
-		}
-	}()
+    reader := bufio.NewReader(c.conn)
+
+    for {
+   //     fmt.Println("[DEBUG] Esperando dados do servidor...")
+
+        respostaBytes, err := reader.ReadBytes('\n')
+        if err != nil {
+            log.Println("[ERRO] Falha ao ler do servidor:", err)
+            break // encerra o loop se a conexão for perdida
+        }
+
+     //   fmt.Println("[DEBUG] Dados recebidos:", string(respostaBytes))
+
+        var resposta Mensagem
+        err = json.Unmarshal(respostaBytes, &resposta)
+        if err != nil {
+            log.Println("[ERRO] Falha ao decodificar JSON:", err)
+            continue
+        }
+
+       // fmt.Println("[DEBUG] Mensagem decodificada, Tipo:", resposta.Tipo)
+
+        // Confirma se o canal ainda está aberto antes de enviar
+        select {
+        case c.msgChan <- resposta:
+        //    fmt.Println("[DEBUG] Mensagem enviada para msgChan:", resposta)
+        default:
+        //    log.Println("[ERRO] Canal msgChan está bloqueado! Mensagem perdida:", resposta)
+        }
+    }
+
+    log.Println("[DEBUG] Goroutine receberMensagem ENCERRADA")
 }
 
-// Loop de interação do cliente com o servidor
+
 func (c *Client) trocaDeMensagens() {
 	contexto, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c.receberMensagem(contexto)
+	// Inicia as goroutines para monitoramento e recebimento de mensagens
+	go c.monitorarBateria(contexto)
+	go c.receberMensagem()
+	entradaChan := make(chan string) // Canal para capturar a entrada do usuário
+	go func() {
+		for {
+			var opcao string
+			fmt.Scanln(&opcao)
+			entradaChan <- opcao
+		}
+	}()
 
 	for {
+		// Exibe o menu apenas quando o usuário pode interagir
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("  1️⃣  | Solicitar Pontos de Recarga")
+		fmt.Println("  2️⃣  | Encerrar Conexão")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Print(" 👉 Escolha uma opção: ")
 
 		select {
 		case <-contexto.Done():
 			return
+
 		case msg := <-c.msgChan:
+			fmt.Println(msg.Tipo)
 			c.processarMensagens(msg)
-		default:
 
-			fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Println("  1️⃣  | Solicitar Pontos de Recarga")
-			fmt.Println("  2️⃣  | Encerrar Conexão")
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Print(" 👉 Escolha uma opção: ")
-
-			var opcao string
-			fmt.Scanln(&opcao)
+		case opcao := <-entradaChan:
 			switch opcao {
 			case "1":
 				limparTela()
 				if err := c.solicitaPontos(); err != nil {
 					fmt.Println("Erro ao solicitar pontos:", err)
-					continue
 				}
 
 			case "2":
 				fmt.Println("🔌 Encerrando conexão...")
 				c.Send("Sair")
+				cancel() // Cancela o contexto para interromper as goroutines
 				c.Close()
 				return
 
@@ -346,6 +430,7 @@ func (c *Client) trocaDeMensagens() {
 		}
 	}
 }
+
 
 // Função para limpar o terminal
 func limparTela() {
@@ -367,12 +452,6 @@ func main() {
 	}
 
 	client.trocaDeMensagens()
+	
 }
 
-/* A ideia central é usar goroutines para deixar seu programa fazendo várias coisas ao mesmo tempo de forma eficiente, sem travar. Imagine seu sistema de recarga de carros elétricos: enquanto o usuário está vendo o menu, o programa pode estar checando o nível da bateria em segundo plano e também ouvindo mensagens do servidor.
-
-Quando a bateria ficar baixa, o sistema automaticamente avisa o servidor sem precisar que o usuário faça nada. Se o servidor mandar uma lista de postos de recarga, isso aparece na tela sem congelar a interface. Tudo acontece de forma fluida, como um bom aplicativo de celular que continua respondendo mesmo quando está carregando dados.
-
-A mágica está em dividir o trabalho em tarefas menores que rodam paralelamente: uma cuida da bateria, outra fica ouvindo o servidor, outra processa os dados recebidos. O contexto serve como um interruptor geral - se precisar fechar o programa, todas essas tarefas são avisadas para encerrar limpasmente, sem deixar nada pendurado.
-
-É como ter vários assistentes trabalhando juntos, cada um com sua função, mas coordenados pelo mesmo chefe (o contexto). Isso torna seu sistema mais rápido, responsivo e profissional, especialmente importante quando lida com operações de rede que podem demorar ou falhar. */
