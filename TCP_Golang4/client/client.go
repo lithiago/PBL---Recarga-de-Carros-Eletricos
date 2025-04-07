@@ -44,10 +44,12 @@ type PontosDeRecarga struct{
 }
 
 
-type HistoricoDePagamento struct{
-	valor float64
-	CoordenadaX float64
-	CoordenadaY float64
+type HistoricoDePagamento struct {
+	CarroId     int     `json:"carroId"`
+	PontoId     int     `json:"pontoId"`
+	Custo       float64 `json:"custo"`
+	CoordenadaX float64 `json:"coordenadaX"`
+	CoordenadaY float64 `json:"coordenadaY"`
 }
 type PontoRecarga struct {
     Distancia float64 `json:"distancia"`
@@ -110,6 +112,8 @@ func NewClient(host string, port string) (*Client, error) {
 		CoordenadaY: randomInRange(r, minY, maxY),
 		Bateria:   100, // Bateria começa cheia
 		msgChan:   make(chan Mensagem, 10),
+		RegistroDeCusto: make(map[int]HistoricoDePagamento),
+
 	}, nil
 }
 
@@ -318,8 +322,18 @@ func (c *Client) movimentarCarro(ctx context.Context) {
     }
 }
 
+func enviarMensagem(conn net.Conn, msg Mensagem) {
+	dados, err := json.Marshal(msg)
+	if err != nil {
+		log.Println("Erro ao serializar mensagem:", err)
+		return
+	}
+	dados = append(dados, '\n')
+	conn.Write(dados)
+	log.Println("Servidor enviou os dados para o carro")
+}
 
-func (c *Client) movimentarParaPonto(destX, destY float64) {
+func (c *Client) movimentarParaPonto(destX, destY float64, pontoId int) {
 	const (
 		passoMetros     = 100.0              // Distância por passo
 		distanciaMinima = 1.0              // Distância mínima para considerar "chegou"
@@ -336,6 +350,18 @@ func (c *Client) movimentarParaPonto(destX, destY float64) {
 	
 		if distancia <= distanciaMinima {
 			fmt.Printf("Destino alcançado: (%.2f, %.2f)\n", c.CoordenadaX, c.CoordenadaY)
+			type info struct {
+				CarroId     int `json:"carroId"`
+				Liberacao bool `json:"liberacao"`
+				PontoId int `json:"pontoId"`
+			}
+			conteudoJSON, err := json.Marshal(info{CarroId: c.Id, PontoId: pontoId, Liberacao: true })
+			if err != nil {
+				log.Println("Erro ao gerar JSON dos pagamentos:", err)
+				return
+			}
+
+			enviarMensagem(c.conn, Mensagem{Tipo: "LiberarPonto", Conteudo: conteudoJSON, OrigemMensagem: "CARRO"})
 			break
 		}
 	
@@ -409,7 +435,7 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 		}
 		fmt.Println("\n✅ Reserva confirmada!")
 		c.pararMovimentacao()
-		c.movimentarParaPonto(reserva.Latitude, reserva.Longitude)
+		c.movimentarParaPonto(reserva.Latitude, reserva.Longitude, reserva.PontoId)
 	case "ID":
 		log.Println("Entrou no ID")
 		type dadosID struct {
@@ -430,28 +456,38 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 			CarroId     int `json:"carroId"`
 			PosicaoFila int `json:"posicaoFila"`
 			PontoId     int `json:"pontoId"`
+			Liberacao bool `json:"liberacao"`
 		}
 		if err := json.Unmarshal(msg.Conteudo, &info); err != nil {
 			log.Println("Erro ao decodificar posição na fila:", err)
 			return
 		}
 		log.Println("Posição na Fila: ", info.PosicaoFila)
-		if info.PosicaoFila == 0 {
-			log.Printf("📍 Você está na posição %d da fila do ponto %d\n", info.PosicaoFila, info.PontoId)
-	
-			// Iniciar recarga se estiver em primeiro e ainda não estiver carregando
-			if info.PosicaoFila == 0 {
-				log.Println("⚡ Você está na posição 1. Iniciando recarga...")
-				c.iniciarRecarga(info.PontoId)
-			}
-		}
+		if info.PosicaoFila == 1 && info.Liberacao {
+			log.Println("⚡ Você está na posição 1. Iniciando recarga...")
+			go c.iniciarRecarga(info.PontoId)
+		} 
 	case "Pagamento":
-		var Pagamento HistoricoDePagamento
-		if err := json.Unmarshal(msg.Conteudo, &Pagamento); err != nil {
+		limparTela()
+		var pagamento HistoricoDePagamento
+		if err := json.Unmarshal(msg.Conteudo, &pagamento); err != nil {
 			log.Println("Erro ao decodificar posição na fila:", err)
 			return
 		}
-		
+	
+		c.RegistroDeCusto[pagamento.PontoId] = pagamento
+		log.Printf(
+			"[Registro de Custo] Carro ID: %d | Ponto ID: %d | Custo: %.2f | Coordenadas: (%.2f, %.2f)\n",
+			pagamento.CarroId,
+			pagamento.PontoId,
+			pagamento.Custo,
+			pagamento.CoordenadaX,
+			pagamento.CoordenadaY,
+		)
+	
+		// ✅ Só agora retomamos a movimentação
+		go c.iniciarMovimentacao()
+	
 
 	}
 }
@@ -530,32 +566,33 @@ func (c *Client)iniciarEntradaUsuario(entradaChan chan<- string) {
 func (c *Client) iniciarRecarga(idPonto int) {
 	log.Println("🔌 Iniciando processo de recarga...")
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	totalCarregado := 0
+
 	for range ticker.C {
 		c.mutex.Lock()
 		if c.Bateria >= 99 {
 			c.Bateria = 100
-			// Envia mensagem final de recarga concluída
+			totalCarregado++
+			bateriaAtual := c.Bateria
+			c.mutex.Unlock()
+
 			log.Println("✅ Bateria totalmente carregada.")
-			c.enviarBateria(idPonto, totalCarregado, "RecargaConcluida")
-			
-			/* // Retorna à movimentação normal
-			go c.iniciarMovimentacao()
-			return */
+			c.enviarBateria(idPonto, totalCarregado, bateriaAtual, "RecargaConcluida")
+			break
 		}
 
-		// Simula incremento de 1% por segundo
 		c.Bateria += 1
 		totalCarregado++
+		bateriaAtual := c.Bateria
 		log.Printf("🔋 Bateria: %d%%\n", c.Bateria)
 		c.mutex.Unlock()
 
-		// Envia atualização da bateria
-		c.enviarBateria(idPonto, totalCarregado, "Recarga")
+		c.enviarBateria(idPonto, totalCarregado, bateriaAtual, "Recarga")
 	}
 }
+
 
 
 func (c *Client)enviarMensagem(conn net.Conn, msg Mensagem) {
@@ -569,45 +606,53 @@ func (c *Client)enviarMensagem(conn net.Conn, msg Mensagem) {
 	log.Println("Servidor enviou os dados para o carro")
 }
 
-func (c *Client) enviarBateria(idPonto int, totalCarregado int, tipo string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	type bateria struct{
-		Bateria int `json:"bateria"`
-		CarroId      int `json:"carroId"`
-		PontoId int `json:"pontoId"`		
+func (c *Client) enviarBateria(idPonto, totalCarregado, bateriaAtual int, tipo string) {
+	type bateria struct {
+		Bateria         int `json:"bateria"`
+		CarroId         int `json:"carroId"`
+		PontoId         int `json:"pontoId"`
+		TotalCarregado  int `json:"totalCarregado"`
 	}
 
-	conteudoJSON, err := json.Marshal(bateria{Bateria: c.Bateria, CarroId: c.Id, PontoId: idPonto})
+	conteudoJSON, err := json.Marshal(bateria{
+		Bateria:        bateriaAtual,
+		CarroId:        c.Id,
+		PontoId:        idPonto,
+		TotalCarregado: totalCarregado,
+	})
 	if err != nil {
 		log.Println("Erro ao serializar reserva:", err)
 		return
 	}
+
 	msg := Mensagem{
-		Tipo:     tipo,
-		Conteudo: conteudoJSON,
-		OrigemMensagem: "CARRO",
+		Tipo:            tipo,
+		Conteudo:        conteudoJSON,
+		OrigemMensagem:  "CARRO",
 	}
+
+	log.Printf("Bateria Carregada em [%d%%]", bateriaAtual)
 	c.enviarMensagem(c.conn, msg)
 }
-
 
 func (c *Client) trocaDeMensagens() {
 	contexto, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	entradaChan := make(chan string)  // Canal para capturar a entrada do usuário
+
+	entradaChan := make(chan string) // Canal para entrada do usuário
 	c.iniciarEntradaUsuario(entradaChan)
 
-	// Inicia as goroutines para monitoramento e recebimento de mensagens
+	// Inicia movimentação do carro (não bloqueia)
 	go c.iniciarMovimentacao()
-	//go c.monitorarBateria(contexto)
+	// Você pode reativar a bateria se quiser
+	// go c.monitorarBateria(contexto)
 	go c.receberMensagem()
 
 	for {
-		if !c.estaProcessando(){// Exibe o menu apenas quando o usuário pode interagir
-			fmt.Println("Posição X: ", c.CoordenadaX)
-			fmt.Println("Posição Y: ", c.CoordenadaY)
+		// Exibe o menu somente quando o cliente não está processando nada
+		if !c.estaProcessando() {
+			fmt.Println("Posição X:", c.CoordenadaX)
+			fmt.Println("Posição Y:", c.CoordenadaY)
 			fmt.Printf("🔋 Bateria: %d%%\n", c.Bateria)
 			fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
@@ -617,27 +662,28 @@ func (c *Client) trocaDeMensagens() {
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			fmt.Print(" 👉 Escolha uma opção: ")
 		}
+
 		select {
 		case <-contexto.Done():
 			return
 
 		case msg := <-c.msgChan:
 			limparTela()
-			log.Println("[Troca] Mensagem recebida:", msg.Tipo)
-			c.processarMensagens(msg, entradaChan) // 👈 Passa canal
+			// ✅ Agora processa em paralelo, evitando bloqueio do loop principal
+			go c.processarMensagens(msg, entradaChan)
+
 		case opcao := <-entradaChan:
-			log.Println("Entrou")
 			switch opcao {
 			case "1":
 				limparTela()
 				if err := c.solicitaPontos(); err != nil {
-					fmt.Println("Erro ao solicitar pontos:", err)
+					log.Println("Erro ao solicitar pontos:", err)
 				}
 
 			case "2":
 				fmt.Println("🔌 Encerrando conexão...")
 				c.Send("Sair")
-				cancel() // Cancela o contexto para interromper as goroutines
+				cancel()
 				c.Close()
 				return
 
@@ -647,6 +693,7 @@ func (c *Client) trocaDeMensagens() {
 		}
 	}
 }
+
 
 
 // Função para limpar o terminal

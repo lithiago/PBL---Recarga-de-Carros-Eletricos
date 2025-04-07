@@ -37,6 +37,7 @@ type Carro struct {
 	CoordenadaY float64 `json:"coordenadaY"`
 	Bateria   int     `json:"bateria"`
 	Id        int     `json:"id"`
+	Liberacao bool	`json:"liberacao"`
 }
 
 type DadosParaCarro struct {
@@ -162,7 +163,7 @@ func (p *Ponto) processarReserva(msg Mensagem) error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
+/* 
 	if len(p.fila) >= MaxFila {
 		erroMsg, _ := json.Marshal(dados{MsgString: "Fila Cheia", CarroId: carro.Id, PontoId: p.Id})
 		p.envioChan <- Mensagem{
@@ -171,7 +172,7 @@ func (p *Ponto) processarReserva(msg Mensagem) error {
 			OrigemMensagem: "PONTO",
 		}
 		return nil
-	}
+	} */
 
 	p.fila = append(p.fila, carro)
 
@@ -199,11 +200,13 @@ func (p *Ponto) processarFilaRecarga() {
 				CarroId     int `json:"carroId"`
 				PosicaoFila int `json:"posicaoFila"`
 				PontoId     int `json:"pontoId"`
+				Liberacao bool `json:"liberacao"`
 			}
 			msgPosicao, err := json.Marshal(dadosPosicao{
 				CarroId:     carro.Id,
 				PosicaoFila: i + 1, // 1-based index
 				PontoId:     p.Id,
+				Liberacao: p.fila[i].Liberacao,
 			})
 			if err != nil {
 				log.Printf("Erro ao serializar posição para carro %d: %v\n", carro.Id, err)
@@ -232,8 +235,10 @@ func (p *Ponto) trocaDeMensagens() {
 
 	for {
 		msg := <-p.msgCanal
-		fmt.Println("LATITUDE: ", p.CoordenadaX)
-		fmt.Println("LONGITUDE: ", p.CoordenadaY)
+		
+		for i := range p.fila{
+			log.Printf("Carros na fila [%d]\n", p.fila[i].Id)
+		}
 		switch msg.Tipo {
 		case "RESERVA":
 			log.Println("[PONTO] Recebi Solicitação")
@@ -252,6 +257,8 @@ func (p *Ponto) trocaDeMensagens() {
 			}
 			p.Id = idPonto.IdCliente
 			log.Printf("✅ ID recebido e atribuído: %d\n", p.Id)
+		case "Posicionado":
+
 		case "Recarga":
 			type bateria struct {
 				Bateria  int `json:"bateria"`
@@ -270,16 +277,6 @@ func (p *Ponto) trocaDeMensagens() {
 				log.Printf("🔋 Carro [%d] com %d%% de carga, já carregou %d%% total a ser pago: R$ %.2f", bateriaResp.CarroId, bateriaResp.Bateria, bateriaResp.TotalCarregado, float64(bateriaResp.TotalCarregado) * 10)
 			} else {
 				log.Printf("✅ Carro [%d] completou a recarga, seu saldo já será registrado. Liberando ponto...", bateriaResp.CarroId)
-				
-		
-				// Remove o primeiro da fila
-				if len(p.fila) > 0 {
-					p.fila = p.fila[1:]
-				} else {
-					log.Println("⚠️ Tentativa de remover da fila, mas a fila está vazia.")
-				}
-
-
 			}
 		case "CustosDoCarro":
 			type bateria struct{
@@ -301,10 +298,31 @@ func (p *Ponto) trocaDeMensagens() {
 				CoordenadaX float64 `json:"coordenadaX"`
 				CoordenadaY float64 `json:"coordenadaY"`
 			}
-
+			if len(p.fila) == 0 {
+				log.Printf("✅ Fila do ponto [%d] está vazia após liberação", p.Id)
+			} else {
+				log.Printf("📍 Próximo carro na fila do ponto [%d]: %d", p.Id, p.fila[0].Id)
+				p.fila = p.fila[1:]
+			}
 			conteudoJSON, _ := json.Marshal(Pagamento{CarroId: bateriaResp.CarroId, PontoId: p.Id, Custo: float64(bateriaResp.TotalCarregado) * 10, CoordenadaX: p.CoordenadaX, CoordenadaY: p.CoordenadaY})
 			p.envioChan <- Mensagem{Tipo: "CustosDoCarro", Conteudo: conteudoJSON, OrigemMensagem: "PONTO"}
-		
+		case "Liberacao":
+			type info struct {
+				CarroId     int `json:"carroId"`
+				Liberacao bool `json:"liberacao"`
+				PontoId int `json:"pontoId"`
+			}
+			var dados info
+			if err := json.Unmarshal(msg.Conteudo, &dados); err != nil {
+				log.Println("Erro ao decodificar pontos:", err)
+				return
+			}
+
+			for i := range p.fila{
+				if p.fila[i].Id == dados.CarroId{
+					p.fila[i].Liberacao = dados.Liberacao
+				}
+			}
 		default:
 			log.Printf("Recebi mensagem com Tipo: '%s', Origem: '%s', Conteúdo bruto: %s", msg.Conteudo, msg.OrigemMensagem, string(msg.Conteudo))
 		}
