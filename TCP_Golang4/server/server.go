@@ -6,65 +6,69 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"time"
 )
+const (
+	MaxFila          = 10
+	TempoRecargaBase = 60 * time.Second
+	VelocidadeMedia  = 13.8 // m/s (50 km/h)
+	EarthRadius      = 6371000
+)
+
 
 type Server struct {
 	listenAddr string
 	ln         net.Listener
 	quitch     chan struct{}
 	msgch      chan Mensagem
-	clients    map[int]*Cliente
+	clients    map[int]*Carro
 	pontos     map[int]*Ponto
 	mu         sync.RWMutex
 	clientID   int // Contador seguro para IDs únicos
 	pontoID    int
 }
 
-/* type Ponto struct {
-	Conn          net.Conn
-	Latitude      float64
-	Longitude     float64
-	Fila          []string
-	TempoDeEspera int
-	mu            sync.Mutex
-} */
-
-type Carro struct {
-	Latitude  float64
-	Longitude float64
-	conn net.Conn
-	bateria int
+type Reserva struct {
+	PontoId int `json:"ponto"`
+	CoordenadaX float64 `json:"coordenadaX"`
+	CoordenadaY float64 `json:"coordenadaY"`
+	Bateria   int	`json:"bateria"`
+	CarroId int `json:"id"`
+}
+type Carro struct{
+	Conn net.Conn
+	CoordenadaX float64 `json:"coordenadaX"`
+	CoordenadaY float64 `json:"coordenadaY"`
+	Bateria   int	`json:"bateria"`
+	Id int `json:"id"`
 }
 
 type Coordenadas struct {
-	Latitude  float64
-	Longitude float64
+	CoordenadaX  float64 
+	CoordenadaY float64
 }
 
 type Ponto struct {
-	Conn net.Conn `json:"conn"`
+	Conn net.Conn 
 	Distancia   float64 `json:"distancia"`
 	TempoEspera float64 `json:"tempo_espera"`
 	Fila        []Carro     `json:"fila"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
+	CoordenadaX    float64 `json:"CoordenadaX"`
+	CoordenadaY   float64 `json:"coordenadaY"`
+	Id int `json:"id"`
 	mu            sync.Mutex
 
 }
 
-type Cliente struct {
-	Endereco           net.Conn
-	SaldoDevedor       map[string]float64
-	ExtratoDePagamento map[string]float64
-}
 
 type ReqPontoDeRecarga struct {
-	Latitude  float64
-	Longitude float64
+	CoordenadaX  float64
+	CoordenadaY float64
 	conn net.Conn
 }
 
@@ -79,7 +83,7 @@ func NewServer(listenAddr string) *Server {
 		listenAddr: listenAddr,
 		quitch:     make(chan struct{}),
 		msgch:      make(chan Mensagem, 100),
-		clients:    make(map[int]*Cliente),
+		clients:    make(map[int]*Carro),
 		pontos:     make(map[int]*Ponto),
 		clientID:   0,
 		pontoID:    0,
@@ -127,57 +131,47 @@ func (s *Server) acceptLoop(ctx context.Context) {
 				return
 			}
 
+			var id int
+			type dadosID struct {
+				IdCliente int `json:"idCliente"`
+			}
 			s.mu.Lock()
 			if mensagem.OrigemMensagem == "CARRO" {
-				id := s.clientID
-				s.clients[id] = &Cliente{
-					Endereco:           conn,
-					SaldoDevedor:       make(map[string]float64),
-					ExtratoDePagamento: make(map[string]float64),
+				id = s.clientID
+				s.clients[id] = &Carro{
+					Conn: conn,
+					Id:   id,
 				}
 				s.clientID++
 				fmt.Println("Novo cliente (CARRO) conectado:", conn.RemoteAddr())
 			} else if mensagem.OrigemMensagem == "PONTO" {
-				id := s.pontoID
-				ponto := &Ponto{
-					Conn:          conn,
-					Fila:          make([]Carro, 0),
+				var posicoes Coordenadas
+				_ = json.Unmarshal(mensagem.Conteudo, &posicoes)
+				id = s.pontoID
+				s.pontos[id] = &Ponto{
+					Conn:        conn,
+					Fila:        make([]Carro, 0),
 					TempoEspera: 0.0,
+					Id:          id,
+					CoordenadaX: posicoes.CoordenadaX,
+					CoordenadaY: posicoes.CoordenadaY,
 				}
-				s.pontos[id] = ponto
 				s.pontoID++
-				go ponto.processarFila()
 				fmt.Println("Novo ponto conectado:", conn.RemoteAddr())
+				fmt.Println("ID Ponto:", s.pontoID)
+			}			
+			dadosCliente := dadosID{IdCliente: id} 
+			// Envia o ID atribuído ao cliente de volta
+			// Envia o ID atribuído ao cliente de volta
+			conteudoJSON, err := json.Marshal(dadosCliente)
+			if err != nil {
+				fmt.Println("Erro ao codificar JSON de ID:", err)
+				return
 			}
+			enviarMensagem(conn, Mensagem{Tipo: "ID", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
 			s.mu.Unlock()
-
 			s.readLoop(conn)
 		}(conn)
-	}
-}
-
-func (p *Ponto) processarFila() {
-	for {
-		p.mu.Lock()
-		if len(p.Fila) == 0 {
-			p.mu.Unlock()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		veiculo := p.Fila[0]
-		tempoEspera := p.TempoEspera
-		p.mu.Unlock()
-
-		time.Sleep(time.Duration(tempoEspera) * time.Second)
-
-		p.mu.Lock()
-		if len(p.Fila) > 0 && p.Fila[0] == veiculo {
-			p.Fila = p.Fila[1:]
-			mensagem := fmt.Sprintf("Recarga concluída para %s\n", veiculo)
-			p.Conn.Write([]byte(mensagem))
-		}
-		p.mu.Unlock()
 	}
 }
 
@@ -198,46 +192,201 @@ func (s *Server) readLoop(conn net.Conn) {
 			continue
 		}
 
+
 		s.processarMensagens(msg, conn)
 	}
 }
 
 func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
-	if msg.OrigemMensagem == "CARRO" || msg.OrigemMensagem == "PONTO" && msg.Tipo == "Pontos"  {
-		var coordenadas Coordenadas
-		if err := json.Unmarshal(msg.Conteudo, &coordenadas); err != nil {
-			log.Println("Erro ao decodificar pontos:", err)
-			return
+	switch msg.OrigemMensagem{
+	case "CARRO":
+		switch msg.Tipo{
+			case "Pontos":
+				var coordenadas Coordenadas
+				if err := json.Unmarshal(msg.Conteudo, &coordenadas); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+				s.mu.RLock()
+				var pontos []*Ponto
+				for id, _ := range s.pontos {
+					tempo, dist := s.calcularTempoEspera(coordenadas, s.pontos[id])
+					s.pontos[id].TempoEspera = tempo
+					s.pontos[id].Distancia = dist
+					pontos = append(pontos, s.pontos[id])
+				}
+				s.mu.RUnlock()
+				sort.Slice(pontos, func(i, j int) bool {
+					return pontos[i].TempoEspera < pontos[j].TempoEspera
+				})
+				resp := struct {
+					Listapontos []*Ponto `json:"listapontos"`
+				}{
+					Listapontos: pontos,
+				}
+				conteudoJSON, err := json.Marshal(resp)
+				if err != nil {
+					log.Println("Erro ao serializar resposta:", err)
+					return
+				}
+				enviarMensagem(conn, Mensagem{
+					Tipo:           "PONTOS",
+					Conteudo:       conteudoJSON,
+					OrigemMensagem: "Servidor",
+				})
+			case "RESERVA":
+				log.Println("Entrou no Caso de Reserva")
+
+				var reserva Reserva
+				if err := json.Unmarshal(msg.Conteudo, &reserva); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+				ponto := s.pontos[reserva.PontoId]
+				conteudoJSON, err := json.Marshal(Carro{CoordenadaX: reserva.CoordenadaX, CoordenadaY: reserva.CoordenadaY, Bateria: reserva.Bateria, Id: reserva.CarroId})
+				if err != nil {
+					log.Println("Erro ao serializar resposta:", err)
+					return
+				}
+				enviarMensagem(ponto.Conn, Mensagem{Tipo: "RESERVA", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			case "Recarga":
+				type bateria struct{
+					Bateria int `json:"bateria"`
+					CarroId      int `json:"carroId"`
+					PontoId int `json:"pontoId"`		
+				}
+				var bateriaAtt bateria
+				if err := json.Unmarshal(msg.Conteudo, &bateriaAtt); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+				conteudoJSON, err := json.Marshal(bateria{Bateria: bateriaAtt.Bateria, CarroId: bateriaAtt.CarroId, PontoId: bateriaAtt.PontoId})
+				if err != nil {
+					log.Println("Erro ao serializar resposta:", err)
+					return
+				}
+				ponto := s.pontos[bateriaAtt.PontoId]
+				enviarMensagem(ponto.Conn, Mensagem{Tipo: "Recarga", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			case "RecargaConcluida":
+				type bateria struct{
+					Bateria int `json:"bateria"`
+					CarroId      int `json:"carroId"`
+					PontoId int `json:"pontoId"`
+					TotalCarregado int `json:"totalCarregado"`		
+				}
+				var bateriaCarregada bateria
+				if err := json.Unmarshal(msg.Conteudo, &bateriaCarregada); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+				conteudoJSON, err := json.Marshal(bateria{Bateria: bateriaCarregada.Bateria, CarroId: bateriaCarregada.CarroId, PontoId: bateriaCarregada.PontoId, TotalCarregado: bateriaCarregada.TotalCarregado})
+				if err != nil {
+					log.Println("Erro ao serializar resposta:", err)
+					return
+				}
+				ponto := s.pontos[bateriaCarregada.PontoId]
+				enviarMensagem(ponto.Conn, Mensagem{Tipo: "CustosDoCarro", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			}
+	case "PONTO":
+		switch msg.Tipo{
+			case "RESERVACONFIRMADA":
+
+				type dados struct {
+					MsgString string `json:"msgString"`
+					CarroId   int    `json:"carroId"`
+					PontoId int `json:"pontoId"`
+				}
+				var infos dados
+				if err := json.Unmarshal(msg.Conteudo, &infos); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+				carro := s.clients[infos.CarroId]
+				ponto := s.pontos[infos.PontoId]
+
+				type dadosReserva struct{
+					CoordenadaX float64 `json:"coordenadaX"`
+					CoordenadaY float64 `json:"coordenadaY"`
+					PontoId int `json:"pontoId"`
+				}
+
+				conteudoJSON, err := json.Marshal(dadosReserva{CoordenadaX: ponto.CoordenadaX, CoordenadaY: ponto.CoordenadaY, PontoId: ponto.Id})
+				if err != nil {
+					log.Println("Erro ao serializar resposta:", err)
+					return
+				}
+				log.Println("Entrou em Reserva: ", carro.Conn.RemoteAddr())
+
+				enviarMensagem(carro.Conn, Mensagem{Tipo: "RESERVA", Conteudo:conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			case "AtualizacaoPosicaoFila":
+				type dadosPosicao struct {
+					CarroId     int `json:"carroId"`
+					PosicaoFila int `json:"posicaoFila"`
+					PontoId     int `json:"pontoId"`
+					TamanhoFila int `json:"tamanhoFila"`
+
+				}
+
+				var dados dadosPosicao
+				if err := json.Unmarshal(msg.Conteudo, &dados); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+
+				type resposta struct{
+					PosicaoNaFila int `json:"posicaoNaFila"`
+					TempoEspera float64 `json:"tempoEspera"`
+				}
+
+				resp := resposta{PosicaoNaFila: dados.PosicaoFila, TempoEspera: float64(dados.TamanhoFila) * TempoRecargaBase.Seconds()}
+				conteudoJSON, _ := json.Marshal(resp)
+				carro := s.clients[dados.CarroId]
+				enviarMensagem(carro.Conn, Mensagem{Tipo: "AtualizacaoPosicaoFila", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			
+			case "CustosDoCarro":
+				type Pagamento struct {
+					CarroId     int     `json:"carroId"`
+					PontoId     int     `json:"pontoId"`
+					Custo       float64 `json:"custo"`
+					CoordenadaX float64 `json:"coordenadaX"`
+					CoordenadaY float64 `json:"coordenadaY"`
+				}
+			
+				var dadosPagamento Pagamento
+				if err := json.Unmarshal(msg.Conteudo, &dadosPagamento); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+			
+				// Registrar em JSON (acrescentando no arquivo)
+				func(p Pagamento) {
+					const fileName = "pagamentos.json"
+			
+					// Lê pagamentos existentes, se houver
+					var pagamentos []Pagamento
+					if fileData, err := os.ReadFile(fileName); err == nil {
+						_ = json.Unmarshal(fileData, &pagamentos)
+					}
+			
+					// Adiciona novo pagamento
+					pagamentos = append(pagamentos, p)
+			
+					// Salva de volta no arquivo
+					fileData, err := json.MarshalIndent(pagamentos, "", "  ")
+					if err != nil {
+						log.Println("Erro ao gerar JSON dos pagamentos:", err)
+						return
+					}
+					if err := os.WriteFile(fileName, fileData, 0644); err != nil {
+						log.Println("Erro ao salvar arquivo de pagamentos:", err)
+					}
+				}(dadosPagamento)
+			
+				// Continua a lógica existente
+				enviarMensagem(s.clients[dadosPagamento.CarroId].Conn, Mensagem{Tipo: "Pagamento", Conteudo: msg.Conteudo})
+			
+
 		}
-
-		pontos, err := s.buscaPontosDeRecarga(coordenadas.Latitude, coordenadas.Longitude, conn)
-		if err != nil {
-			log.Println("Erro ao buscar pontos:", err)
-			return
-		}
-
-		log.Println("[DEBUG] Dados recebidos:", pontos)
-
-		resp := struct {
-			Listapontos []*Ponto `json:"listapontos"`
-		}{
-			Listapontos: pontos,
-		}
-
-		conteudoJSON, err := json.Marshal(resp)
-		if err != nil {
-			log.Println("Erro ao serializar resposta:", err)
-			return
-		}
-
-		enviarMensagem(conn, Mensagem{
-			Tipo:           "PONTOS",
-			Conteudo:       conteudoJSON,
-			OrigemMensagem: "Servidor",
-		})
-	}
-	if msg.OrigemMensagem == "PONTO" && msg.Tipo == "LocalizacaoResposta"{
-
 	}
 }
 
@@ -249,89 +398,29 @@ func enviarMensagem(conn net.Conn, msg Mensagem) {
 	}
 	dados = append(dados, '\n')
 	conn.Write(dados)
+	log.Println("Servidor enviou os dados para o carro")
 }
 
 
 
-
-func (s *Server) buscaPontosDeRecarga(latitude, longitude float64, conn net.Conn) ([]*Ponto, error) {
-	req := ReqPontoDeRecarga{
-		Latitude:  latitude,
-		Longitude: longitude,
-		conn: conn,
-	}
-
-	conteudoJSON, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	pontos := make([]*Ponto, 0) // Alterado para armazenar ponteiros
-
-	s.mu.RLock()
-	pontosConexoes := make([]*Ponto, 0, len(s.pontos))
-	for _, ponto := range s.pontos {
-		pontosConexoes = append(pontosConexoes, ponto)
-	}
-	s.mu.RUnlock()
-
-	for _, ponto := range pontosConexoes {
-		wg.Add(1)
-
-		go func(p *Ponto) {
-			defer wg.Done()
-
-			enviarMensagem(p.Conn, Mensagem{
-				Tipo:           "Localizacao",
-				Conteudo:       conteudoJSON,
-				OrigemMensagem: "Servidor",
-			})
-
-			
-
-			select {
-
-	
-			case msg := <-s.msgch:
-				fmt.Println(msg.Tipo)
-				pontoJSON := msg.Conteudo
-				var pontoResp Ponto
-				if err := json.Unmarshal(pontoJSON, &pontoResp); err != nil {
-					fmt.Println("erro ao decodificar carro: %w", err)
-				}
-				mu.Lock()
-				pontos = append(pontos, &pontoResp) // Agora armazenamos um ponteiro
-				mu.Unlock()
-			}
-			/* buffer := make([]byte, 4096)
-			dados, err := p.Conn.Read(buffer)
-			if err != nil {
-				return
-			} */
-
-			/* var msg Mensagem
-			if err := json.Unmarshal(buffer[:dados], &msg); err != nil {
-				return
-			} */
-
-			
-		}(ponto)
-	}
-
-	wg.Wait()
-
-	if len(pontos) == 0 {
-		return nil, fmt.Errorf("nenhum ponto disponível")
-	}
-
-	// Ordenação corrigida para trabalhar com ponteiros
-	sort.Slice(pontos, func(i, j int) bool {
-		return pontos[i].TempoEspera < pontos[j].TempoEspera
+func (s *Server) calcularTempoEspera(coordCarro Coordenadas, ponto *Ponto) (tempoTotal, distancia float64) {
+	distancia = s.distanciaPara(coordCarro, Coordenadas{
+		CoordenadaX:  ponto.CoordenadaX,  // já é Y em metros
+		CoordenadaY: ponto.CoordenadaY, // já é X em metros
 	})
+	log.Println("distancia: ", distancia)
 
-	return pontos, nil
+	tempoViagem := distancia / VelocidadeMedia
+	tempoEspera := float64(len(ponto.Fila))
+
+	return tempoViagem + tempoEspera, distancia
+}
+
+
+func (s *Server) distanciaPara(coordCarro, coordPonto Coordenadas) float64 {
+	dx := coordCarro.CoordenadaX - coordPonto.CoordenadaX
+	dy := coordCarro.CoordenadaY - coordPonto.CoordenadaY
+	return math.Hypot(dx, dy)
 }
 
 

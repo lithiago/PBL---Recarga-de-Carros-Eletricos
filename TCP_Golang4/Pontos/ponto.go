@@ -5,44 +5,45 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
 )
 
-// Constantes de configuração
+// Constantes
 const (
 	MaxFila          = 10
 	TempoRecargaBase = 60 * time.Second
-	VelocidadeMedia  = 13.8 // m/s (50 km/h)
+	VelocidadeMedia  = 13.8
 	EarthRadius      = 6371000
 )
 
-// Structs (mantidas como requisitado)
+// Structs
 type Ponto struct {
 	conn            net.Conn
-	latitude        float64
-	longitude       float64
+	CoordenadaX        float64
+	CoordenadaY       float64
 	fila            []Carro
 	disponibilidade bool
 	mu              sync.Mutex
 	msgCanal        chan Mensagem
+	envioChan       chan Mensagem
+	Id              int
 }
 
 type Carro struct {
-	Latitude  float64
-	Longitude float64
-	conn      net.Conn
-	bateria   int
+	CoordenadaX  float64 `json:"coordenadaX"`
+	CoordenadaY float64 `json:"coordenadaY"`
+	Bateria   int     `json:"bateria"`
+	Id        int     `json:"id"`
 }
 
 type DadosParaCarro struct {
-	Conn        net.Conn
 	Distancia   float64 `json:"distancia"`
 	TempoEspera float64 `json:"tempo_espera"`
 	Fila        []Carro `json:"fila"`
-	Latitude    float64 `json:"latitude"`
+	CoordenadaX    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
 }
 
@@ -57,21 +58,33 @@ type Mensagem struct {
 	OrigemMensagem string `json:"origemmensagem"`
 }
 
-// ==========================
-// Inicialização do Ponto
-// ==========================
+// Inicialização
 func NewPosto(host, port string) (*Ponto, error) {
 	address := net.JoinHostPort(host, port)
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao conectar ao servidor: %v", err)
 	}
+	type initMsg struct{
+		CoordenadaX    float64 `json:"CoordenadaX"`
+		CoordenadaY   float64 `json:"coordenadaY"`
+	}
+	
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	minX, maxX := 0.0, 5000.0 // de 0 a 10 km no eixo X
+	minY, maxY := 0.0, 5000.0 // de 0 a 10 km no eixo Y
+	ponto := &Ponto{
+		conn:            conn,
+		CoordenadaX:        randomInRange(r, minX, maxX),
+		CoordenadaY:       randomInRange(r, minY, maxY),
+		disponibilidade: true,
+		fila:            make([]Carro, 0),
+		msgCanal:        make(chan Mensagem, 100),
+		envioChan:       make(chan Mensagem, 100),
+	}
 
-	initMsg := struct {
-		Msg string `json:"msg"`
-	}{"Inicio de Conexão"}
 
-	msgBytes, err := json.Marshal(initMsg)
+	msgBytes, err := json.Marshal(initMsg{CoordenadaX: ponto.CoordenadaX, CoordenadaY: ponto.CoordenadaY})
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("erro ao serializar mensagem inicial: %v", err)
@@ -82,27 +95,26 @@ func NewPosto(host, port string) (*Ponto, error) {
 		Conteudo:       msgBytes,
 		OrigemMensagem: "PONTO",
 	}
+	
 
-	if err := sendJSON(conn, mensagem); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("erro ao enviar mensagem inicial: %v", err)
-	}
+	// Disparar envio dedicado
+	go ponto.gerenciarEnvio()
 
-	return &Ponto{
-		conn:            conn,
-		latitude:        -23.5505,
-		longitude:       -46.6333,
-		disponibilidade: true,
-		fila:            make([]Carro, 0),
-		msgCanal:        make(chan Mensagem),
-	}, nil
+	ponto.envioChan <- mensagem
+
+	return ponto, nil
 }
-
-// ==========================
-// Envio de Mensagens
-// ==========================
-func (p *Ponto) enviarMensagem(msg Mensagem) error {
-	return sendJSON(p.conn, msg)
+// Função para gerar um número aleatório dentro de um intervalo
+func randomInRange(r *rand.Rand, min, max float64) float64 {
+	return min + r.Float64()*(max-min)
+}
+// Escrita segura no servidor
+func (p *Ponto) gerenciarEnvio() {
+	for msg := range p.envioChan {
+		if err := sendJSON(p.conn, msg); err != nil {
+			log.Println("Erro ao enviar mensagem:", err)
+		}
+	}
 }
 
 func sendJSON(conn net.Conn, msg Mensagem) error {
@@ -114,9 +126,7 @@ func sendJSON(conn net.Conn, msg Mensagem) error {
 	return err
 }
 
-// ==========================
-// Comunicação com Servidor
-// ==========================
+// Leitura de dados do servidor
 func (p *Ponto) receberDados() {
 	reader := bufio.NewReader(p.conn)
 	for {
@@ -131,49 +141,19 @@ func (p *Ponto) receberDados() {
 			log.Printf("Erro ao decodificar JSON: %v\nConteúdo bruto: %s\n", err, string(dados))
 			continue
 		}
-
-		log.Printf("Mensagem recebida: %+v\n", msg)
 		p.msgCanal <- msg
 	}
 }
 
-// ==========================
-// Processamento de Localização
-// ==========================
-func (p *Ponto) processarLocalizacao() error {
-	msg := <-p.msgCanal
+// Reserva
+func (p *Ponto) processarReserva(msg Mensagem) error {
+	log.Println("Processando Reserva")
 
-	var req Carro
-	if err := json.Unmarshal(msg.Conteudo, &req); err != nil {
-		return fmt.Errorf("erro ao decodificar carro: %w", err)
+	type dados struct {
+		MsgString string `json:"msgString"`
+		CarroId   int    `json:"carroId"`
+		PontoId int `json:"pontoId"`
 	}
-
-	tempo, distancia := p.calcularTempoEspera(req.Latitude, req.Longitude)
-	resposta := DadosParaCarro{
-		Distancia:   distancia,
-		TempoEspera: tempo,
-		Fila:        p.fila,
-		Latitude:    p.latitude,
-		Longitude:   p.longitude,
-	}
-
-	conteudoJSON, err := json.Marshal(resposta)
-	if err != nil {
-		return fmt.Errorf("erro ao serializar resposta JSON: %w", err)
-	}
-
-	return p.enviarMensagem(Mensagem{
-		Tipo:     "LocalizacaoResposta",
-		Conteudo: conteudoJSON,
-		OrigemMensagem: "PONTO",
-	})
-}
-
-// ==========================
-// Processamento de Reserva
-// ==========================
-func (p *Ponto) processarReserva() error {
-	msg := <-p.msgCanal
 
 	var carro Carro
 	if err := json.Unmarshal(msg.Conteudo, &carro); err != nil {
@@ -184,92 +164,154 @@ func (p *Ponto) processarReserva() error {
 	defer p.mu.Unlock()
 
 	if len(p.fila) >= MaxFila {
-		return p.enviarMensagem(Mensagem{
-			Tipo:     "Falha",
-			Conteudo: []byte(`{"msg":"Fila Cheia"}`),
-		})
+		erroMsg, _ := json.Marshal(dados{MsgString: "Fila Cheia", CarroId: carro.Id, PontoId: p.Id})
+		p.envioChan <- Mensagem{
+			Tipo:           "Falha",
+			Conteudo:       erroMsg,
+			OrigemMensagem: "PONTO",
+		}
+		return nil
 	}
 
 	p.fila = append(p.fila, carro)
 
-	return p.enviarMensagem(Mensagem{
-		Tipo:     "ReservaConfirmada",
-		Conteudo: []byte(`{"msg":"Reserva Confirmada"}`),
-	})
-}
-
-// ==========================
-// Processamento de Recarga
-// ==========================
-func (p *Ponto) iniciarRecarga(cliente *Carro) {
-	for cliente.bateria < 100 {
-		time.Sleep(1 * time.Second)
-		cliente.bateria++
+	sucessoMsg, _ := json.Marshal(dados{MsgString: "Reserva Confirmada", CarroId: carro.Id, PontoId: p.Id})
+	p.envioChan <- Mensagem{
+		Tipo:           "RESERVACONFIRMADA",
+		Conteudo:       sucessoMsg,
+		OrigemMensagem: "PONTO",
 	}
 
-	conteudoJSON, err := json.Marshal(cliente)
-	if err != nil {
-		log.Println("Erro ao serializar cliente:", err)
-		return
+	return nil
+}
+
+func (p *Ponto) processarFilaRecarga() {
+	for {
+		p.mu.Lock()
+		if len(p.fila) == 0 {
+			p.mu.Unlock()
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		// Enviar posição atual da fila para cada carro
+		for i, carro := range p.fila {
+			type dadosPosicao struct {
+				CarroId     int `json:"carroId"`
+				PosicaoFila int `json:"posicaoFila"`
+				PontoId     int `json:"pontoId"`
+			}
+			msgPosicao, err := json.Marshal(dadosPosicao{
+				CarroId:     carro.Id,
+				PosicaoFila: i + 1, // 1-based index
+				PontoId:     p.Id,
+			})
+			if err != nil {
+				log.Printf("Erro ao serializar posição para carro %d: %v\n", carro.Id, err)
+				continue
+			}
+
+			p.envioChan <- Mensagem{
+				Tipo:           "AtualizacaoPosicaoFila",
+				Conteudo:       msgPosicao,
+				OrigemMensagem: "PONTO",
+			}
+		}
+		p.mu.Unlock()
+		time.Sleep(2 * time.Second) // envia atualização da fila a cada 2s
+		// Espera o primeiro da fila iniciar recarga e ser removido externamente
+		time.Sleep(3 * time.Second)
 	}
-
-	p.enviarMensagem(Mensagem{Tipo: "Recarga", Conteudo: conteudoJSON})
-
-	p.mu.Lock()
-	if len(p.fila) > 0 {
-		p.fila = p.fila[1:]
-	}
-	p.mu.Unlock()
 }
 
-// ==========================
-// Cálculo de Distância e Tempo
-// ==========================
-func (p *Ponto) calcularTempoEspera(lat, lon float64) (float64, float64) {
-	dist := p.distanciaPara(Coordenadas{Latitude: lat, Longitude: lon})
-	viagem := dist / VelocidadeMedia
-	espera := float64(len(p.fila)) * TempoRecargaBase.Seconds()
-	return viagem + espera, dist
-}
 
-func (p *Ponto) distanciaPara(dest Coordenadas) float64 {
-	toRad := func(deg float64) float64 { return deg * math.Pi / 180 }
 
-	lat1, lon1 := toRad(p.latitude), toRad(p.longitude)
-	lat2, lon2 := toRad(dest.Latitude), toRad(dest.Longitude)
-	dLat := lat2 - lat1
-	dLon := lon2 - lon1
-
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
-		math.Cos(lat1)*math.Cos(lat2)*math.Sin(dLon/2)*math.Sin(dLon/2)
-
-	return EarthRadius * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-}
-
-// ==========================
-// Loop Principal
-// ==========================
+// Processador principal
 func (p *Ponto) trocaDeMensagens() {
 	go p.receberDados()
+	go p.processarFilaRecarga()
 
 	for {
 		msg := <-p.msgCanal
-
+		fmt.Println("LATITUDE: ", p.CoordenadaX)
+		fmt.Println("LONGITUDE: ", p.CoordenadaY)
 		switch msg.Tipo {
-		case "Localizacao":
-			log.Printf("Processando: %s", msg.Tipo)
-			if err := p.processarLocalizacao(); err != nil {
-				log.Println("Erro em Localizacao:", err)
-			}
-		case "Reserva":
-			if err := p.processarReserva(); err != nil {
+		case "RESERVA":
+			log.Println("[PONTO] Recebi Solicitação")
+			if err := p.processarReserva(msg); err != nil {
 				log.Println("Erro em Reserva:", err)
 			}
+		case "ID":
+			type dadosID struct {
+				IdCliente int `json:"idCliente"`
+			}
+			var idPonto dadosID
+			log.Printf("Conteúdo bruto da mensagem recebida: %s", string(msg.Conteudo))
+			if err := json.Unmarshal(msg.Conteudo, &idPonto); err != nil {
+				log.Println("Erro:", err)
+	
+			}
+			p.Id = idPonto.IdCliente
+			log.Printf("✅ ID recebido e atribuído: %d\n", p.Id)
+		case "Recarga":
+			type bateria struct {
+				Bateria  int `json:"bateria"`
+				CarroId  int `json:"carroId"`
+				PontoId  int `json:"pontoId"`
+				TotalCarregado int `json:"totalCarregado"`
+			}
+		
+			var bateriaResp bateria
+			if err := json.Unmarshal(msg.Conteudo, &bateriaResp); err != nil {
+				log.Println("Erro ao decodificar JSON:", err)
+				return
+			}
+		
+			if bateriaResp.Bateria < 100 {
+				log.Printf("🔋 Carro [%d] com %d%% de carga, já carregou %d%% total a ser pago: R$ %.2f", bateriaResp.CarroId, bateriaResp.Bateria, bateriaResp.TotalCarregado, float64(bateriaResp.TotalCarregado) * 10)
+			} else {
+				log.Printf("✅ Carro [%d] completou a recarga, seu saldo já será registrado. Liberando ponto...", bateriaResp.CarroId)
+				
+		
+				// Remove o primeiro da fila
+				if len(p.fila) > 0 {
+					p.fila = p.fila[1:]
+				} else {
+					log.Println("⚠️ Tentativa de remover da fila, mas a fila está vazia.")
+				}
+
+
+			}
+		case "CustosDoCarro":
+			type bateria struct{
+				Bateria int `json:"bateria"`
+				CarroId      int `json:"carroId"`
+				PontoId int `json:"pontoId"`
+				TotalCarregado int `json:"totalCarregado"`		
+			}
+			var bateriaResp bateria
+			if err := json.Unmarshal(msg.Conteudo, &bateriaResp); err != nil {
+				log.Println("Erro ao decodificar JSON:", err)
+				return
+			}
+
+			type Pagamento struct {
+				CarroId int `json:"carroId"`
+				PontoId int `json:"pontoId"`
+				Custo float64 `json:"custo"`
+				CoordenadaX float64 `json:"coordenadaX"`
+				CoordenadaY float64 `json:"coordenadaY"`
+			}
+
+			conteudoJSON, _ := json.Marshal(Pagamento{CarroId: bateriaResp.CarroId, PontoId: p.Id, Custo: float64(bateriaResp.TotalCarregado) * 10, CoordenadaX: p.CoordenadaX, CoordenadaY: p.CoordenadaY})
+			p.envioChan <- Mensagem{Tipo: "CustosDoCarro", Conteudo: conteudoJSON, OrigemMensagem: "PONTO"}
+		
 		default:
-			log.Printf("Tipo de mensagem desconhecido: %s", msg.Tipo)
+			log.Printf("Recebi mensagem com Tipo: '%s', Origem: '%s', Conteúdo bruto: %s", msg.Conteudo, msg.OrigemMensagem, string(msg.Conteudo))
 		}
 	}
 }
+
+// Finalizador
 func (p *Ponto) Close() {
 	log.Println("Encerrando conexão do ponto de recarga...")
 
@@ -280,14 +322,10 @@ func (p *Ponto) Close() {
 			log.Println("Conexão fechada com sucesso.")
 		}
 	}
-
-	// Se desejar fechar o canal também, descomente a linha abaixo:
-	// close(p.msgCanal)
+	close(p.envioChan)
 }
 
-// ==========================
 // Main
-// ==========================
 func main() {
 	ponto, err := NewPosto("server", "3000")
 	if err != nil {
