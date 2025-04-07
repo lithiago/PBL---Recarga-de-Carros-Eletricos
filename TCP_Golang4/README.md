@@ -36,9 +36,11 @@ O sistema é dividido em três componentes principais:
 4. Digite para rodar o ponto:
   ```bash
    docker-compose run --rm ponto
+   ```
 5. Digite para rodar o cliente:
     ```bash
    docker-compose run --rm client
+    ```
 
 ## 💸 Pagamentos
 
