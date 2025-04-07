@@ -163,17 +163,6 @@ func (p *Ponto) processarReserva(msg Mensagem) error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-/* 
-	if len(p.fila) >= MaxFila {
-		erroMsg, _ := json.Marshal(dados{MsgString: "Fila Cheia", CarroId: carro.Id, PontoId: p.Id})
-		p.envioChan <- Mensagem{
-			Tipo:           "Falha",
-			Conteudo:       erroMsg,
-			OrigemMensagem: "PONTO",
-		}
-		return nil
-	} */
-
 	p.fila = append(p.fila, carro)
 
 	sucessoMsg, _ := json.Marshal(dados{MsgString: "Reserva Confirmada", CarroId: carro.Id, PontoId: p.Id})
@@ -187,51 +176,56 @@ func (p *Ponto) processarReserva(msg Mensagem) error {
 }
 
 func (p *Ponto) processarFilaRecarga() {
-	for {
-		p.mu.Lock()
-		if len(p.fila) == 0 {
-			p.mu.Unlock()
-			time.Sleep(1 * time.Second)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.fila) == 0 {
+		return
+	}
+
+	for i, carro := range p.fila {
+		type dadosPosicao struct {
+			CarroId        int  `json:"carroId"`
+			PosicaoFila    int  `json:"posicaoFila"`
+			PontoId        int  `json:"pontoId"`
+			Liberacao      bool `json:"liberacao"`
+			Disponibilidade bool `json:"disponibilidade"`
+			Autorizado     bool `json:"autorizado"`
+		}
+
+		autorizado := false
+		if i == 0 && carro.Liberacao && p.disponibilidade {
+			autorizado = true
+			p.disponibilidade = false // travar ponto para recarga
+		}
+
+		msgPosicao, err := json.Marshal(dadosPosicao{
+			CarroId:        carro.Id,
+			PosicaoFila:    i + 1,
+			PontoId:        p.Id,
+			Liberacao:      carro.Liberacao,
+			Disponibilidade: p.disponibilidade,
+			Autorizado:     autorizado,
+		})
+		if err != nil {
+			log.Printf("Erro ao serializar posição para carro %d: %v\n", carro.Id, err)
 			continue
 		}
-		// Enviar posição atual da fila para cada carro
-		for i, carro := range p.fila {
-			type dadosPosicao struct {
-				CarroId     int `json:"carroId"`
-				PosicaoFila int `json:"posicaoFila"`
-				PontoId     int `json:"pontoId"`
-				Liberacao bool `json:"liberacao"`
-			}
-			msgPosicao, err := json.Marshal(dadosPosicao{
-				CarroId:     carro.Id,
-				PosicaoFila: i + 1, // 1-based index
-				PontoId:     p.Id,
-				Liberacao: p.fila[i].Liberacao,
-			})
-			if err != nil {
-				log.Printf("Erro ao serializar posição para carro %d: %v\n", carro.Id, err)
-				continue
-			}
 
-			p.envioChan <- Mensagem{
-				Tipo:           "AtualizacaoPosicaoFila",
-				Conteudo:       msgPosicao,
-				OrigemMensagem: "PONTO",
-			}
+		p.envioChan <- Mensagem{
+			Tipo:           "AtualizacaoPosicaoFila",
+			Conteudo:       msgPosicao,
+			OrigemMensagem: "PONTO",
 		}
-		p.mu.Unlock()
-		time.Sleep(2 * time.Second) // envia atualização da fila a cada 2s
-		// Espera o primeiro da fila iniciar recarga e ser removido externamente
-		time.Sleep(3 * time.Second)
 	}
 }
+
 
 
 
 // Processador principal
 func (p *Ponto) trocaDeMensagens() {
 	go p.receberDados()
-	go p.processarFilaRecarga()
 
 	for {
 		msg := <-p.msgCanal
@@ -257,8 +251,6 @@ func (p *Ponto) trocaDeMensagens() {
 			}
 			p.Id = idPonto.IdCliente
 			log.Printf("✅ ID recebido e atribuído: %d\n", p.Id)
-		case "Posicionado":
-
 		case "Recarga":
 			type bateria struct {
 				Bateria  int `json:"bateria"`
@@ -275,8 +267,12 @@ func (p *Ponto) trocaDeMensagens() {
 		
 			if bateriaResp.Bateria < 100 {
 				log.Printf("🔋 Carro [%d] com %d%% de carga, já carregou %d%% total a ser pago: R$ %.2f", bateriaResp.CarroId, bateriaResp.Bateria, bateriaResp.TotalCarregado, float64(bateriaResp.TotalCarregado) * 10)
+				p.disponibilidade = false
 			} else {
 				log.Printf("✅ Carro [%d] completou a recarga, seu saldo já será registrado. Liberando ponto...", bateriaResp.CarroId)
+				p.disponibilidade = true
+				p.processarFilaRecarga()
+
 			}
 		case "CustosDoCarro":
 			type bateria struct{
@@ -303,6 +299,8 @@ func (p *Ponto) trocaDeMensagens() {
 			} else {
 				log.Printf("📍 Próximo carro na fila do ponto [%d]: %d", p.Id, p.fila[0].Id)
 				p.fila = p.fila[1:]
+				p.disponibilidade = true
+				p.processarFilaRecarga()
 			}
 			conteudoJSON, _ := json.Marshal(Pagamento{CarroId: bateriaResp.CarroId, PontoId: p.Id, Custo: float64(bateriaResp.TotalCarregado) * 10, CoordenadaX: p.CoordenadaX, CoordenadaY: p.CoordenadaY})
 			p.envioChan <- Mensagem{Tipo: "CustosDoCarro", Conteudo: conteudoJSON, OrigemMensagem: "PONTO"}
@@ -323,6 +321,7 @@ func (p *Ponto) trocaDeMensagens() {
 					p.fila[i].Liberacao = dados.Liberacao
 				}
 			}
+			p.processarFilaRecarga()
 		default:
 			log.Printf("Recebi mensagem com Tipo: '%s', Origem: '%s', Conteúdo bruto: %s", msg.Conteudo, msg.OrigemMensagem, string(msg.Conteudo))
 		}
