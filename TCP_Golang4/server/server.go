@@ -249,6 +249,21 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 					return
 				}
 				enviarMensagem(ponto.Conn, Mensagem{Tipo: "RESERVA", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+			case "LiberarPonto":
+				type info struct {
+					CarroId     int `json:"carroId"`
+					Liberacao bool `json:"liberacao"`
+					PontoId int `json:"pontoId"`
+				}
+				var dados info
+				if err := json.Unmarshal(msg.Conteudo, &dados); err != nil {
+					log.Println("Erro ao decodificar pontos:", err)
+					return
+				}
+
+				enviarMensagem(s.pontos[dados.PontoId].Conn, Mensagem{Tipo: "Liberacao", Conteudo: msg.Conteudo, OrigemMensagem: "SERVIDOR"} )
+
+
 			case "Recarga":
 				type bateria struct{
 					Bateria int `json:"bateria"`
@@ -323,8 +338,7 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 					CarroId     int `json:"carroId"`
 					PosicaoFila int `json:"posicaoFila"`
 					PontoId     int `json:"pontoId"`
-					TamanhoFila int `json:"tamanhoFila"`
-
+					Liberacao bool `json:"liberacao"`
 				}
 
 				var dados dadosPosicao
@@ -334,14 +348,15 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 				}
 
 				type resposta struct{
-					PosicaoNaFila int `json:"posicaoNaFila"`
-					TempoEspera float64 `json:"tempoEspera"`
+					CarroId     int `json:"carroId"`
+					PosicaoFila int `json:"posicaoFila"`
+					PontoId     int `json:"pontoId"`
 				}
-
-				resp := resposta{PosicaoNaFila: dados.PosicaoFila, TempoEspera: float64(dados.TamanhoFila) * TempoRecargaBase.Seconds()}
-				conteudoJSON, _ := json.Marshal(resp)
+/* 
+				resp := resposta{CarroId: dados.CarroId, PosicaoFila: dados.PosicaoFila, PontoId: dados.PontoId}
+				conteudoJSON, _ := json.Marshal(resp) */
 				carro := s.clients[dados.CarroId]
-				enviarMensagem(carro.Conn, Mensagem{Tipo: "AtualizacaoPosicaoFila", Conteudo: conteudoJSON, OrigemMensagem: "SERVIDOR"})
+				enviarMensagem(carro.Conn, Mensagem{Tipo: "AtualizacaoPosicaoFila", Conteudo: msg.Conteudo, OrigemMensagem: "SERVIDOR"})
 			
 			case "CustosDoCarro":
 				type Pagamento struct {
@@ -383,7 +398,7 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 				}(dadosPagamento)
 			
 				// Continua a lógica existente
-				enviarMensagem(s.clients[dadosPagamento.CarroId].Conn, Mensagem{Tipo: "Pagamento", Conteudo: msg.Conteudo})
+				enviarMensagem(s.clients[dadosPagamento.CarroId].Conn, Mensagem{Tipo: "Pagamento", Conteudo: msg.Conteudo, OrigemMensagem: "SERVIDOR"})
 			
 
 		}
