@@ -32,8 +32,13 @@ O sistema é dividido em três componentes principais:
 2. Compile os arquivos `.go` de cada componente.
 3. Utilize os arquivos Docker incluídos para subir múltiplas instâncias:
    ```bash
-   docker compose up --build
-4. Siga os scripts de teste no diretório `/scripts` para simular o fluxo completo.
+   docker-compose up --build
+4. Digite para rodar o ponto:
+  '''bash
+   docker-compose run --rm ponto
+5. Digite para rodar o cliente:
+   '''bash
+   docker-compose run --rm client
 
 ## 💸 Pagamentos
 
