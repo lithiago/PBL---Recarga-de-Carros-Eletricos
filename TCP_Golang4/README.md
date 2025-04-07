@@ -42,10 +42,6 @@ O sistema é dividido em três componentes principais:
    docker-compose run --rm client
     ```
 
-## 💸 Pagamentos
-
-Todos os registros de recarga são associados a uma conta de usuário com suporte a pagamento via PIX.
-
 ## 📄 Requisitos e Restrições
 
 - Comunicação apenas via sockets TCP;
