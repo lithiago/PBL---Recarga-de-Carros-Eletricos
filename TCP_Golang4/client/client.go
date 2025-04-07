@@ -37,6 +37,7 @@ type Client struct {
 	cancelarEntrada context.CancelFunc
 	mensagemNoCanal bool
 	RegistroDeCusto map[int]HistoricoDePagamento
+	carregando bool
 }
 
 type PontosDeRecarga struct{
@@ -305,16 +306,15 @@ func (c *Client) movimentarCarro(ctx context.Context) {
             return
         default:
             c.mutex.Lock()
-            if c.Bateria > 0 && c.statusCarro != "EM MOVIMENTO" {
+            if c.Bateria > 0 {
                 angulo := r.Float64() * 2 * math.Pi
                 deltaX := velocidade * math.Cos(angulo) * intervalo
                 deltaY := velocidade * math.Sin(angulo) * intervalo
 
                 c.CoordenadaX += deltaX
                 c.CoordenadaY += deltaY
-                c.Bateria -= 1
+                c.Bateria -= 5
                 c.statusCarro = "MOVIMENTANDO"
-				fmt.Printf("X: (%.2f, Y: %.2f) |\n", c.CoordenadaX, c.CoordenadaY)
             }
             c.mutex.Unlock()
             time.Sleep(time.Duration(intervalo * float64(time.Second)))
@@ -397,7 +397,6 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
     defer c.setProcessando(false) // Garante que o flag volta para falso
 	switch msg.Tipo {
 	case "PONTOS":
-		log.Println("eNTROU EM PROCESSAR MENSAGENS")
 		var resposta struct {
 			Listapontos []*PontoRecarga `json:"listapontos"`
 		}
@@ -414,6 +413,7 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 
 		fmt.Print(" 👉 Escolha um Ponto para reservar: ")
 		opcaoStr := <-entradaChan
+		log.Println("[Processamento] Recebido ID do ponto:", opcao)
 		opcao, err := strconv.Atoi(opcaoStr)
 		if err != nil {
 			log.Println("Entrada inválida:", err)
@@ -437,7 +437,6 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 		c.pararMovimentacao()
 		c.movimentarParaPonto(reserva.Latitude, reserva.Longitude, reserva.PontoId)
 	case "ID":
-		log.Println("Entrou no ID")
 		type dadosID struct {
 			IdCliente int `json:"idCliente"`
 		}
@@ -448,7 +447,6 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 			return
 		}
 		c.Id = idRecebido.IdCliente
-		log.Printf("✅ ID recebido e atribuído: %d\n", c.Id)
 	// Essa case existe para que o cliente possa iniciar a recarga assim que chegar a vez
 	case "AtualizacaoPosicaoFila":
 		limparTela()
@@ -457,13 +455,23 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 			PosicaoFila int `json:"posicaoFila"`
 			PontoId     int `json:"pontoId"`
 			Liberacao bool `json:"liberacao"`
+			Disponibilidade bool `json:"disponibilidade"`
+			Autorizado     bool `json:"autorizado"`
+
 		}
 		if err := json.Unmarshal(msg.Conteudo, &info); err != nil {
 			log.Println("Erro ao decodificar posição na fila:", err)
 			return
 		}
-		log.Println("Posição na Fila: ", info.PosicaoFila)
-		if info.PosicaoFila == 1 && info.Liberacao {
+		log.Printf(
+			"📍 Posição na Fila: %d\n🔌 Disponibilidade do Ponto: %t\n🚗 Liberação do Carro: %t\n✅ Autorizado a Recarregar: %t",
+			info.PosicaoFila,
+			info.Disponibilidade,
+			info.Liberacao,
+			info.Autorizado,
+		)
+		if info.PosicaoFila == 1 && info.Autorizado {
+			c.carregando = true
 			log.Println("⚡ Você está na posição 1. Iniciando recarga...")
 			go c.iniciarRecarga(info.PontoId)
 		} 
@@ -476,14 +484,6 @@ func (c *Client) processarMensagens(msg Mensagem, entradaChan <-chan string) {
 		}
 	
 		c.RegistroDeCusto[pagamento.PontoId] = pagamento
-		log.Printf(
-			"[Registro de Custo] Carro ID: %d | Ponto ID: %d | Custo: %.2f | Coordenadas: (%.2f, %.2f)\n",
-			pagamento.CarroId,
-			pagamento.PontoId,
-			pagamento.Custo,
-			pagamento.CoordenadaX,
-			pagamento.CoordenadaY,
-		)
 	
 		// ✅ Só agora retomamos a movimentação
 		go c.iniciarMovimentacao()
@@ -579,6 +579,7 @@ func (c *Client) iniciarRecarga(idPonto int) {
 			c.mutex.Unlock()
 
 			log.Println("✅ Bateria totalmente carregada.")
+			c.carregando = false
 			c.enviarBateria(idPonto, totalCarregado, bateriaAtual, "RecargaConcluida")
 			break
 		}
@@ -635,64 +636,78 @@ func (c *Client) enviarBateria(idPonto, totalCarregado, bateriaAtual int, tipo s
 	c.enviarMensagem(c.conn, msg)
 }
 
-func (c *Client) trocaDeMensagens() {
-	contexto, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	entradaChan := make(chan string) // Canal para entrada do usuário
-	c.iniciarEntradaUsuario(entradaChan)
-
-	// Inicia movimentação do carro (não bloqueia)
-	go c.iniciarMovimentacao()
-	// Você pode reativar a bateria se quiser
-	// go c.monitorarBateria(contexto)
-	go c.receberMensagem()
-
-	for {
-		// Exibe o menu somente quando o cliente não está processando nada
-		if !c.estaProcessando() {
-			fmt.Println("Posição X:", c.CoordenadaX)
-			fmt.Println("Posição Y:", c.CoordenadaY)
-			fmt.Printf("🔋 Bateria: %d%%\n", c.Bateria)
-			fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Println("  1️⃣  | Solicitar Pontos de Recarga")
-			fmt.Println("  2️⃣  | Encerrar Conexão")
-			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-			fmt.Print(" 👉 Escolha uma opção: ")
+func (c *Client) tratarOpcaoMenu(opcao string) {
+	switch opcao {
+	case "1":
+		limparTela()
+		if err := c.solicitaPontos(); err != nil {
+			log.Println("Erro ao solicitar pontos:", err)
 		}
-
-		select {
-		case <-contexto.Done():
-			return
-
-		case msg := <-c.msgChan:
-			limparTela()
-			// ✅ Agora processa em paralelo, evitando bloqueio do loop principal
-			go c.processarMensagens(msg, entradaChan)
-
-		case opcao := <-entradaChan:
-			switch opcao {
-			case "1":
-				limparTela()
-				if err := c.solicitaPontos(); err != nil {
-					log.Println("Erro ao solicitar pontos:", err)
-				}
-
-			case "2":
-				fmt.Println("🔌 Encerrando conexão...")
-				c.Send("Sair")
-				cancel()
-				c.Close()
-				return
-
-			default:
-				fmt.Println("⚠️  Opção inválida. Tente novamente.")
-			}
+	case "2":
+		for _, pagamento := range c.RegistroDeCusto {
+			log.Printf(
+				"[Registro de Custo] Carro ID: %d | Ponto ID: %d | Custo: %.2f | Coordenadas: (%.2f, %.2f)\n",
+				pagamento.CarroId,
+				pagamento.PontoId,
+				pagamento.Custo,
+				pagamento.CoordenadaX,
+				pagamento.CoordenadaY,
+			)
 		}
+	case "3":
+		fmt.Println("🔌 Encerrando conexão...")
+		c.Send("Sair")
+		c.Close()
+		os.Exit(0) // Em vez de return (fora da goroutine), termina direto
+	default:
+		fmt.Println("⚠️  Opção inválida. Tente novamente.")
 	}
 }
+
+func (c *Client) exibirMenu() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("          🚀 MENU PRINCIPAL 🚀        ")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("  Posição X:", c.CoordenadaX)
+	fmt.Println("  Posição Y:", c.CoordenadaY)
+	fmt.Printf("  🔋 Bateria: %d%%\n", c.Bateria)
+	fmt.Printf("  🆔 Carro [%d]: \n", c.Id)
+	fmt.Println("  1️⃣  | Solicitar Pontos de Recarga")
+	fmt.Println("  2️⃣  | Ver registro de custos")
+	fmt.Println("  3️⃣  | Encerrar Conexão")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Print(" 👉 Escolha uma opção: ")
+}
+
+
+func (c *Client) trocaDeMensagens() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	entradaChan := make(chan string)
+	c.iniciarEntradaUsuario(entradaChan)
+
+	go c.iniciarMovimentacao()
+	go c.receberMensagem()
+
+		for {
+			if !c.estaProcessando() && !c.carregando {
+				c.exibirMenu()
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-c.msgChan:
+				c.processarMensagens(msg, entradaChan)
+			case opcao := <-entradaChan:
+				c.tratarOpcaoMenu(opcao)
+			}
+		}
+}
+
 
 
 

@@ -265,17 +265,18 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 
 
 			case "Recarga":
-				type bateria struct{
-					Bateria int `json:"bateria"`
-					CarroId      int `json:"carroId"`
-					PontoId int `json:"pontoId"`		
+				type bateria struct {
+					Bateria  int `json:"bateria"`
+					CarroId  int `json:"carroId"`
+					PontoId  int `json:"pontoId"`
+					TotalCarregado int `json:"totalCarregado"`
 				}
 				var bateriaAtt bateria
 				if err := json.Unmarshal(msg.Conteudo, &bateriaAtt); err != nil {
 					log.Println("Erro ao decodificar pontos:", err)
 					return
 				}
-				conteudoJSON, err := json.Marshal(bateria{Bateria: bateriaAtt.Bateria, CarroId: bateriaAtt.CarroId, PontoId: bateriaAtt.PontoId})
+				conteudoJSON, err := json.Marshal(bateria{Bateria: bateriaAtt.Bateria, CarroId: bateriaAtt.CarroId, PontoId: bateriaAtt.PontoId, TotalCarregado: bateriaAtt.TotalCarregado})
 				if err != nil {
 					log.Println("Erro ao serializar resposta:", err)
 					return
@@ -339,6 +340,8 @@ func (s *Server) processarMensagens(msg Mensagem, conn net.Conn) {
 					PosicaoFila int `json:"posicaoFila"`
 					PontoId     int `json:"pontoId"`
 					Liberacao bool `json:"liberacao"`
+					Disponibilidade bool `json:"disponibilidade"`
+					Autorizado     bool `json:"autorizado"`
 				}
 
 				var dados dadosPosicao
